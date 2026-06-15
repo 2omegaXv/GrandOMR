@@ -1,0 +1,9 @@
+homr
+opencv-python
+numpy
+Pillow
+rapidocr-onnxruntime
+music21
+matplotlib
+openai
+pdf2image

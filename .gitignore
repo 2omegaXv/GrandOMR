@@ -1,0 +1,53 @@
+# Outputs
+pipeline_output/
+audiveris_output/
+homr_output/
+homr_input/
+legato_output/
+legato_test/
+
+# Vendored repos (exploration)
+audiveris/
+oemer/
+legato/
+
+# Caches
+__pycache__/
+*.pyc
+.hf_cache/
+.model_cache/
+.claude/
+
+# Secrets
+.env
+
+# Large binaries
+*.whl
+*.pdf
+*.omr
+*.mscz
+*.mxl
+*.tif
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+
+# Exploration scripts & images
+abc2musicxml.py
+run_legato.py
+visualize_oemer_pred.py
+audiveris_templates.py
+noise_sensitivity.png
+template_matching_demo.png
+templates_overview.png
+oemer_mahler8_pred.png
+core_papers.html
+literature_survey.md
+proposal.*
+cv_final_project_proposal.pdf
+tchai_p1.mscz
