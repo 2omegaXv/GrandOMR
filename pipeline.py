@@ -265,10 +265,10 @@ def _match_override_to_detected(override: List[str], detected: List[str],
 def _inject_transpose(attrs_el, instrument_name: str):
     """Insert <transpose> child into an <attributes> element if the instrument transposes."""
     base, key = _parse_instrument_key(instrument_name)
-    if key is None:
-        key = DEFAULT_TRANSPOSE_KEY.get(base)
-    if key is None:
+    if base not in DEFAULT_TRANSPOSE_KEY:
         return
+    if key is None:
+        key = DEFAULT_TRANSPOSE_KEY[base]
     tr = _compute_transpose(base, key)
     if tr is None:
         return
@@ -384,17 +384,20 @@ def _group_staves_by_brackets(sorted_staffs, brace_dots):
 
 _VLM_PROMPT = """This is a page from an orchestral music score.
 On the left margin there are instrument names or abbreviations.
-Read each instrument name from top to bottom and output its standard English name.
+Count the actual staff lines (each staff is a group of 5 horizontal lines) from top to bottom, and assign each one its instrument name.
 Use ONLY these base instrument names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
 For transposing instruments, append :KEY with the key letter shown on the score.
 Examples: "Kl.(A)" → "Clarinet:A", "(E)" next to "Hr." → "Horn:E", "Trpt.(B)" → "Trumpet:Bb", "Pos." → "Trombone"
-Important:
+CRITICAL — output exactly {n} lines, one per staff. Determine the instrument for each staff by its VISUAL POSITION in the image, not by player numbers in the labels:
+- If one label covers 2 staves (e.g. "Hörner" spanning two staff lines), output the name TWICE.
+- If one label says "1.2" but is next to only ONE staff, output the name ONCE.
+- Never output more or fewer than {n} lines.
+Other rules:
 - "B" alone for a key means Bb (B-flat in German notation). "H" means B-natural.
 - If no key is shown for a transposing instrument, output just the base name (e.g., "Clarinet").
-- If a bracket groups two staves under one label (e.g. "Pos." with "1/2" and "3"), output the SAME name for EACH staff in that bracket.
-- If one label covers multiple numbered staves (e.g. "Hr." with two keys "(E)" and "(C)"), output one name per staff with the CORRECT key for each (e.g. "Horn:E" then "Horn:C").
+- If one label covers staves with different keys (e.g. "Hr." with "(E)" and "(C)"), output one name per staff with the correct key (e.g. "Horn:E" then "Horn:C").
 - German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl.=Cello, B./Kb./K-B./K.B.=Contrabass.
-{ocr_hint}There are exactly {n} staves. Output exactly {n} lines, one name per staff line, from top to bottom. No numbering, no extra text."""
+{ocr_hint}There are exactly {n} staves. Output exactly {n} lines. No numbering, no extra text."""
 
 
 def _ocr_margin_labels(image, staff_left: float,
@@ -555,6 +558,11 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
                 print(f"[OCR→VLM] {ocr_hint.splitlines()[0][:120]}")
         except Exception as e:
             print(f"[OCR→VLM] Failed: {e}")
+
+    # If OCR found no labels, this page has no instrument annotations — skip VLM
+    if not ocr_hint:
+        print(f"[OCR] No instrument labels detected, skipping VLM")
+        return []
 
     # ── Try VLM first ──
     if use_vlm:
@@ -1713,8 +1721,9 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         print(f"[VLM-extra] System names ({len(lines)}): {lines}")
 
+        master_bases = set(_instrument_base(nm) for nm in master_names)
         if len(lines) == n:
-            valid = sum(1 for nm in lines if nm in set(master_names))
+            valid = sum(1 for nm in lines if _instrument_base(nm) in master_bases)
             if valid >= n * 0.5:
                 return lines
         # VLM count mismatch — try expanding via grand staff pair detection
@@ -1724,12 +1733,12 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
                 gaps.append(sys_staves[gi].min_y - sys_staves[gi - 1].max_y)
             min_gap_idx = int(np.argmin(gaps))
             expanded = lines[:min_gap_idx + 1] + [lines[min_gap_idx]] + lines[min_gap_idx + 1:]
-            valid = sum(1 for nm in expanded if nm in set(master_names))
+            valid = sum(1 for nm in expanded if _instrument_base(nm) in master_bases)
             if valid >= n * 0.5:
                 print(f"[VLM-extra] Expanded via grand staff at staves {min_gap_idx}/{min_gap_idx + 1}: {expanded}")
                 return expanded
         if len(lines) > 0:
-            valid_lines = [nm for nm in lines if nm in set(master_names)]
+            valid_lines = [nm for nm in lines if _instrument_base(nm) in master_bases]
             if len(valid_lines) >= n * 0.5:
                 result = list(lines[:n]) if len(lines) >= n else lines + [lines[-1]] * (n - len(lines))
                 print(f"[VLM-extra] Best-effort mapping: {result}")
@@ -1742,7 +1751,8 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
 
 
 def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
-                      tremolo_templates: str = None) -> List[Tuple[str, List[str]]]:
+                      tremolo_templates: str = None,
+                      part_names_override: List[str] = None) -> List[Tuple[str, List[str]]]:
     """
     Run HOMR's complete pipeline with automatic system grouping override
     for orchestral scores. Returns list of (MusicXML string, part names) tuples.
@@ -1826,11 +1836,37 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     # ── OCR instrument names using bracket groups ──
     part_names = ocr_instrument_names_from_staves(staffs, predictions.original, brace_dots, use_vlm=use_vlm)
 
+    # If OCR/VLM returned nothing, use override as part_names for correct grouping
+    if not part_names and part_names_override is not None:
+        part_names = list(part_names_override)
+        print(f"[Override] No labels on this page, reusing: {len(part_names)} instruments")
+
     # ── Determine parts-per-system and group staves ──
     n_parts = len(part_names)
     staffs_sorted = sorted(staffs, key=lambda s: s.min_y)
     system_groups = _detect_system_breaks(staffs_sorted, brace_dots)
     sys_sizes = [len(g) for g in system_groups]
+
+    # Merge adjacent small systems that together equal the first system's staff count
+    if len(system_groups) > 1:
+        target = len(system_groups[0])
+        merged = [system_groups[0]]
+        i = 1
+        while i < len(system_groups):
+            acc = list(system_groups[i])
+            i += 1
+            while len(acc) < target and i < len(system_groups):
+                acc.extend(system_groups[i])
+                i += 1
+            if len(acc) == target:
+                merged.append(acc)
+            else:
+                merged.append(acc)
+        if [len(g) for g in merged] != sys_sizes:
+            print(f"[HOMR] Merged split systems: {sys_sizes} → {[len(g) for g in merged]}")
+            system_groups = merged
+            sys_sizes = [len(g) for g in system_groups]
+
     print(f"[HOMR] Detected {len(system_groups)} system(s): {sys_sizes} staves each")
 
     first_sys_count = sys_sizes[0]
@@ -1892,8 +1928,9 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
             if sys_idx == 0:
                 sys_names = part_names
             else:
+                ref_names = part_names_override if part_names_override else part_names
                 sys_names = _ocr_extra_system_names(
-                    sys_staves, predictions.original, part_names,
+                    sys_staves, predictions.original, ref_names,
                     use_vlm=use_vlm)
 
             xml_root = generate_xml(xml_args, sys_result, title)
@@ -3876,8 +3913,10 @@ def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm: bool = True,
-                 tremolo_templates: str = None, part_names_override: List[str] = None) -> str:
-    """Full pipeline: image → MusicXML."""
+                 tremolo_templates: str = None, part_names_override: List[str] = None):
+    """Full pipeline: image → MusicXML.
+    Returns (output_path, part_names) — part_names is the detected/applied instrument list,
+    useful for passing as override to subsequent pages."""
     print(f"\n{'='*60}")
     print(f"Processing: {img_path}")
     print(f"{'='*60}")
@@ -3886,13 +3925,19 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
     results = run_homr_pipeline(
         img_path, use_gpu=use_gpu, use_vlm=use_vlm,
         tremolo_templates=tremolo_templates,
+        part_names_override=part_names_override,
     )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
+    final_names = None
+
     if len(results) == 1:
         xml_string, part_names = results[0]
-        if part_names_override is not None:
+        if not part_names and part_names_override is not None:
+            part_names = list(part_names_override)
+            print(f"[Override] No labels on this page, reusing: {len(part_names)} instruments")
+        elif part_names_override is not None:
             if len(part_names_override) == len(part_names):
                 part_names = list(part_names_override)
             else:
@@ -3901,15 +3946,21 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
         xml_string = _cross_part_post_process(xml_string)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(xml_string)
+        final_names = part_names
     else:
         import tempfile
         temp_files = []
         for sys_idx, (xml_string, sys_names) in enumerate(results):
-            if part_names_override is not None and sys_idx == 0:
+            if not sys_names and part_names_override is not None:
+                sys_names = list(part_names_override)
+                print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
+            elif part_names_override is not None:
                 if len(part_names_override) == len(sys_names):
                     sys_names = list(part_names_override)
                 else:
                     sys_names = _match_override_to_detected(part_names_override, sys_names, xml_string)
+            if sys_idx == 0:
+                final_names = sys_names
             xml_string = _inject_part_names(xml_string, sys_names)
             xml_string = _cross_part_post_process(xml_string)
             base, ext = os.path.splitext(output_path)
@@ -3922,7 +3973,7 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
 
     elapsed = time.time() - t_start
     print(f"\n[Done] {output_path} ({elapsed:.1f}s)")
-    return output_path
+    return output_path, final_names
 
 
 def main():
@@ -3952,11 +4003,14 @@ def main():
     if len(inputs) == 1 and inputs[0].is_dir():
         out_dir = args.output or str(inputs[0] / "pipeline_output")
         os.makedirs(out_dir, exist_ok=True)
+        detected_names = None
         for img_file in sorted(inputs[0].glob("*.png")):
             out_path = os.path.join(out_dir, img_file.stem + ".musicxml")
             try:
-                run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm,
-                             tremolo_templates=tremolo_tpl)
+                _, names = run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm,
+                             tremolo_templates=tremolo_tpl, part_names_override=detected_names)
+                if detected_names is None and names:
+                    detected_names = names
                 if args.check:
                     quality_check(out_path)
             except Exception as e:
@@ -3976,13 +4030,16 @@ def main():
     # Multi-file merge mode
     if len(inputs) > 1:
         page_xmls = []
+        detected_names = None
         for img_path in inputs:
             if not img_path.is_file():
                 print(f"Error: {img_path} not found")
                 sys.exit(1)
             out = str(img_path.with_suffix(".musicxml"))
-            run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
-                         tremolo_templates=tremolo_tpl)
+            _, names = run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                         tremolo_templates=tremolo_tpl, part_names_override=detected_names)
+            if detected_names is None and names:
+                detected_names = names
             page_xmls.append(out)
 
         merged_out = args.output
