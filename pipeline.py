@@ -127,7 +127,14 @@ TRANSPOSE_TABLE = {
     ("Clarinet", "Eb"):         (2,  3,  0),
     ("Bass Clarinet", "Bb"):    (-1, -2, -1),
     ("Horn", "F"):              (-4, -7, 0),
+    ("Horn", "E"):              (-5, -8, 0),
+    ("Horn", "Eb"):             (-5, -9, 0),
+    ("Horn", "D"):              (-6, -10, 0),
+    ("Horn", "C"):              (0,  0,  0),
     ("Trumpet", "Bb"):          (-1, -2, 0),
+    ("Trumpet", "E"):           (2,  4,  0),
+    ("Trumpet", "D"):           (1,  2,  0),
+    ("Trumpet", "C"):           (0,  0,  0),
     ("English Horn", "F"):      (-4, -7, 0),
 }
 
@@ -140,11 +147,20 @@ DEFAULT_TRANSPOSE_KEY = {
 }
 
 
+_KEY_NORMALIZE = {
+    "a": "A", "b": "Bb", "bb": "Bb", "c": "C", "d": "D",
+    "e": "E", "es": "Eb", "eb": "Eb", "f": "F", "g": "G",
+    "ab": "Ab", "as": "Ab",
+}
+
+
 def _parse_instrument_key(name: str):
-    """'Clarinet in A' → ('Clarinet', 'A'); 'Horn' → ('Horn', None)."""
-    m = re.match(r'^(.+?)\s+in\s+([A-G](?:b|#)?)\s*$', name.strip())
+    """'Clarinet in A' → ('Clarinet', 'A'); 'Clarinet in Es' → ('Clarinet', 'Eb')."""
+    m = re.match(r'^(.+?)\s+in\s+([A-Za-z]+)\s*$', name.strip())
     if m:
-        return m.group(1).strip(), m.group(2)
+        raw_key = m.group(2)
+        key = _KEY_NORMALIZE.get(raw_key.lower(), raw_key)
+        return m.group(1).strip(), key
     return name.strip(), None
 
 
@@ -276,16 +292,45 @@ def _group_staves_by_brackets(sorted_staffs, brace_dots):
 _VLM_PROMPT = """This is a page from an orchestral music score.
 On the left margin there are instrument names or abbreviations.
 Read each instrument name from top to bottom and output its standard English name.
-Use these standard names: Flute, Piccolo, Oboe, English Horn, Clarinet in A, Clarinet in Bb, Clarinet in Eb, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn in F, Horn, Trumpet in Bb, Trumpet in C, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
+Use these standard names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
 Important rules:
-- For transposing instruments (Clarinet, Horn, Trumpet), read the key from the score margin and include it. Examples: "Kl.A" or "Cl. in A" → "Clarinet in A", "Hr.F" → "Horn in F", "Trp.B" → "Trumpet in Bb", "BKl." or "Bkl." → "Bass Clarinet". German "B" means Bb (B-flat). If no key is visible, output just the base name (e.g. "Clarinet").
+- For transposing instruments (Clarinet, Horn, Trumpet), include "in X" with the EXACT key shown on the score. Examples: "(A)" or "in A" → "Clarinet in A", "(E)" next to "Hr." → "Horn in E", "(C)" → "Horn in C". Do NOT default to common keys — use what is printed.
 - If a bracket groups two staves under one label (e.g. "Pos." with "1/2" and "3"), output the SAME name for EACH staff in that bracket.
-- If one label covers multiple numbered staves (e.g. "Hr.F" with "1/3" and "2/4"), output the same name for each.
-- German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass.
-There are exactly {n} staves. Output exactly {n} lines, one standard name per staff line, from top to bottom. No numbering, no extra text."""
+- If one label covers multiple numbered staves (e.g. "Hr." with two keys "(E)" and "(C)"), output one name per staff with the CORRECT key for each (e.g. "Horn in E" then "Horn in C").
+- German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl.=Cello, B./Kb./K-B./K.B.=Contrabass.
+{ocr_hint}There are exactly {n} staves. Output exactly {n} lines, one standard name per staff line, from top to bottom. No numbering, no extra text."""
 
 
-def _vlm_read_instrument_names(image_pil, n_staves: int) -> list:
+def _ocr_margin_labels(image, staff_left: float) -> str:
+    """Quick OCR scan of the left margin, returns sorted raw labels as a hint string."""
+    from rapidocr_onnxruntime import RapidOCR
+    ocr = RapidOCR()
+    x_end = max(0, int(staff_left) - 5)
+    if x_end < 20:
+        return ""
+    crop = image[:, :x_end]
+    if crop.size == 0:
+        return ""
+    result, _ = ocr(crop)
+    if not result:
+        return ""
+    items = []
+    for r in result:
+        t = r[1].strip()
+        if len(t) < 1:
+            continue
+        if re.fullmatch(r'\d+', t):
+            continue
+        y_center = sum(p[1] for p in r[0]) / 4
+        items.append((y_center, t))
+    items.sort()
+    if not items:
+        return ""
+    labels = ", ".join(f'"{t}"' for _, t in items)
+    return f"OCR detected these labels on the left margin (top to bottom): {labels}\nUse these as reference for instrument names and keys.\n"
+
+
+def _vlm_read_instrument_names(image_pil, n_staves: int, ocr_hint: str = "") -> list:
     """Use VLM API (Qwen3-VL-235B) to read instrument names from a score page."""
     import base64, io
     try:
@@ -314,7 +359,7 @@ def _vlm_read_instrument_names(image_pil, n_staves: int) -> list:
     img_b64 = base64.b64encode(buf.getvalue()).decode()
 
     client = openai.OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1/")
-    prompt = _VLM_PROMPT.format(n=n_staves)
+    prompt = _VLM_PROMPT.format(n=n_staves, ocr_hint=ocr_hint)
 
     response = client.chat.completions.create(
         model="Qwen3-VL-235B-A22B-Instruct",
@@ -391,12 +436,22 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
 
     print(f"[OCR] {n_parts} staves, {len(bracket_groups)} groups, staff_left={int(staff_left)}")
 
+    # ── Quick OCR scan for margin labels (used as VLM hint) ──
+    ocr_hint = ""
+    if use_vlm:
+        try:
+            ocr_hint = _ocr_margin_labels(image, staff_left)
+            if ocr_hint:
+                print(f"[OCR→VLM] {ocr_hint.splitlines()[0][:120]}")
+        except Exception as e:
+            print(f"[OCR→VLM] Failed: {e}")
+
     # ── Try VLM first ──
     if use_vlm:
         try:
             from PIL import Image as PILImage
             pil_img = PILImage.fromarray(image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2RGB))
-            vlm_lines = _vlm_read_instrument_names(pil_img, n_staves=n_parts)
+            vlm_lines = _vlm_read_instrument_names(pil_img, n_staves=n_parts, ocr_hint=ocr_hint)
             print(f"[VLM] {len(vlm_lines)} names: {vlm_lines}")
 
             if len(vlm_lines) == n_parts:
