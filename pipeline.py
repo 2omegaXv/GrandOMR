@@ -120,23 +120,13 @@ INSTRUMENT_MIDI = {
     "Celesta":      ("keyboard.celesta",        8),
 }
 
-# Transposition data: (instrument_base, key) → (diatonic, chromatic, octave-change)
-TRANSPOSE_TABLE = {
-    ("Clarinet", "A"):          (-2, -3, 0),
-    ("Clarinet", "Bb"):         (-1, -2, 0),
-    ("Clarinet", "Eb"):         (2,  3,  0),
-    ("Bass Clarinet", "Bb"):    (-1, -2, -1),
-    ("Horn", "F"):              (-4, -7, 0),
-    ("Horn", "E"):              (-5, -8, 0),
-    ("Horn", "Eb"):             (-5, -9, 0),
-    ("Horn", "D"):              (-6, -10, 0),
-    ("Horn", "C"):              (0,  0,  0),
-    ("Trumpet", "Bb"):          (-1, -2, 0),
-    ("Trumpet", "E"):           (2,  4,  0),
-    ("Trumpet", "D"):           (1,  2,  0),
-    ("Trumpet", "C"):           (0,  0,  0),
-    ("English Horn", "F"):      (-4, -7, 0),
+_KEY_SEMITONES = {
+    "C": 0, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5,
+    "Gb": 6, "G": 7, "Ab": 8, "A": 9, "Bb": 10, "B": 11,
 }
+_KEY_LETTER_INDEX = {"C": 0, "D": 1, "E": 2, "F": 3, "G": 4, "A": 5, "B": 6}
+_TRANSPOSE_ALWAYS_DOWN = {"Horn", "English Horn"}
+_EXTRA_OCTAVE = {"Bass Clarinet": -1}
 
 DEFAULT_TRANSPOSE_KEY = {
     "Clarinet": "Bb",
@@ -147,6 +137,24 @@ DEFAULT_TRANSPOSE_KEY = {
 }
 
 
+def _compute_transpose(base: str, key: str):
+    """Compute (diatonic, chromatic, octave_change) purely from key letter.
+    Direction: Horn/English Horn always down; others nearest to unison."""
+    semitones = _KEY_SEMITONES.get(key)
+    if semitones is None or semitones == 0:
+        return None
+    letter_idx = _KEY_LETTER_INDEX[key[0]]
+    go_down = base in _TRANSPOSE_ALWAYS_DOWN or semitones > 6
+    if go_down:
+        chromatic = semitones - 12
+        diatonic = letter_idx - 7
+    else:
+        chromatic = semitones
+        diatonic = letter_idx
+    octave = _EXTRA_OCTAVE.get(base, 0)
+    return (diatonic, chromatic, octave)
+
+
 _KEY_NORMALIZE = {
     "a": "A", "b": "Bb", "bb": "Bb", "c": "C", "d": "D",
     "e": "E", "es": "Eb", "eb": "Eb", "f": "F", "g": "G",
@@ -155,18 +163,103 @@ _KEY_NORMALIZE = {
 
 
 def _parse_instrument_key(name: str):
-    """'Clarinet in A' → ('Clarinet', 'A'); 'Clarinet in Es' → ('Clarinet', 'Eb')."""
-    m = re.match(r'^(.+?)\s+in\s+([A-Za-z]+)\s*$', name.strip())
+    """'Clarinet:A' → ('Clarinet', 'A'); 'Clarinet in A' → ('Clarinet', 'A');
+    'Horn:Eb' → ('Horn', 'Eb'); 'Violin' → ('Violin', None)."""
+    name = name.strip()
+    # New colon format from VLM: "Clarinet:A"
+    m = re.match(r'^(.+?):([A-Za-z]+)\s*$', name)
     if m:
         raw_key = m.group(2)
         key = _KEY_NORMALIZE.get(raw_key.lower(), raw_key)
         return m.group(1).strip(), key
-    return name.strip(), None
+    # Legacy "in X" format
+    m = re.match(r'^(.+?)\s+in\s+([A-Za-z]+)\s*$', name)
+    if m:
+        raw_key = m.group(2)
+        key = _KEY_NORMALIZE.get(raw_key.lower(), raw_key)
+        return m.group(1).strip(), key
+    return name, None
 
 
 def _instrument_base(name: str) -> str:
     """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups."""
     return _parse_instrument_key(name)[0]
+
+
+_STEP_TO_MIDI = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+
+def _extract_part_pitches(xml_string: str) -> List[List[int]]:
+    """Extract MIDI pitch values for each part from a MusicXML string."""
+    root = ET.fromstring(xml_string)
+    result = []
+    for part in root.findall("part"):
+        midis = []
+        for note in part.iter("note"):
+            pitch = note.find("pitch")
+            if pitch is None:
+                continue
+            step = pitch.find("step")
+            octave = pitch.find("octave")
+            alter = pitch.find("alter")
+            if step is None or octave is None:
+                continue
+            midi = (int(octave.text) + 1) * 12 + _STEP_TO_MIDI.get(step.text, 0)
+            if alter is not None:
+                midi += int(float(alter.text))
+            midis.append(midi)
+        result.append(midis)
+    return result
+
+
+def _match_override_to_detected(override: List[str], detected: List[str],
+                                xml_string: str = None) -> List[str]:
+    """When override has more names than detected staves (tacet instruments),
+    find the best order-preserving subsequence of override matching detected.
+    Uses pitch range verification when xml_string is provided."""
+    from itertools import combinations
+    M, N = len(override), len(detected)
+    if M <= N:
+        return override[:N]
+
+    part_pitches = _extract_part_pitches(xml_string) if xml_string else None
+
+    detected_bases = [_instrument_base(n) for n in detected]
+    candidates = []
+    for indices in combinations(range(M), N):
+        subset_bases = [_instrument_base(override[i]) for i in indices]
+        name_score = sum(1 for a, b in zip(subset_bases, detected_bases) if a == b)
+        pitch_score = 0
+        pitch_bad = 0
+        if part_pitches and len(part_pitches) == N:
+            for j, idx in enumerate(indices):
+                base = _instrument_base(override[idx])
+                rng = STANDARD_RANGES.get(base)
+                midis = part_pitches[j]
+                if rng and midis:
+                    lo, hi = rng
+                    frac = sum(1 for m in midis if lo - 12 <= m <= hi + 12) / len(midis)
+                    pitch_score += frac
+                    if frac < 0.3:
+                        pitch_bad += 1
+                elif midis:
+                    pitch_score += 1.0
+        candidates.append((name_score, pitch_score, pitch_bad, indices))
+
+    if part_pitches and candidates:
+        candidates.sort(key=lambda c: (c[2], -c[1], -c[0]))
+        best_name, best_pitch, best_bad, best_indices = candidates[0]
+    else:
+        candidates.sort(key=lambda c: -c[0])
+        best_name, best_pitch, best_bad, best_indices = candidates[0]
+
+    if best_name >= N * 0.3 or (part_pitches and best_pitch >= N * 0.5):
+        dropped = [override[i] for i in range(M) if i not in set(best_indices)]
+        matched = [override[i] for i in best_indices]
+        print(f"[Override] Matched {best_name}/{N} by name, pitch={best_pitch:.1f}, bad={best_bad}, tacet: {dropped}")
+        return matched
+    print(f"[Override] Poor match ({best_name}/{N}), using first {N} names")
+    return override[:N]
 
 
 def _inject_transpose(attrs_el, instrument_name: str):
@@ -176,7 +269,7 @@ def _inject_transpose(attrs_el, instrument_name: str):
         key = DEFAULT_TRANSPOSE_KEY.get(base)
     if key is None:
         return
-    tr = TRANSPOSE_TABLE.get((base, key))
+    tr = _compute_transpose(base, key)
     if tr is None:
         return
     diatonic, chromatic, octave = tr
@@ -292,17 +385,22 @@ def _group_staves_by_brackets(sorted_staffs, brace_dots):
 _VLM_PROMPT = """This is a page from an orchestral music score.
 On the left margin there are instrument names or abbreviations.
 Read each instrument name from top to bottom and output its standard English name.
-Use these standard names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
-Important rules:
-- For transposing instruments (Clarinet, Horn, Trumpet), include "in X" with the EXACT key shown on the score. Examples: "(A)" or "in A" → "Clarinet in A", "(E)" next to "Hr." → "Horn in E", "(C)" → "Horn in C". Do NOT default to common keys — use what is printed.
+Use ONLY these base instrument names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
+For transposing instruments, append :KEY with the key letter shown on the score.
+Examples: "Kl.(A)" → "Clarinet:A", "(E)" next to "Hr." → "Horn:E", "Trpt.(B)" → "Trumpet:Bb", "Pos." → "Trombone"
+Important:
+- "B" alone for a key means Bb (B-flat in German notation). "H" means B-natural.
+- If no key is shown for a transposing instrument, output just the base name (e.g., "Clarinet").
 - If a bracket groups two staves under one label (e.g. "Pos." with "1/2" and "3"), output the SAME name for EACH staff in that bracket.
-- If one label covers multiple numbered staves (e.g. "Hr." with two keys "(E)" and "(C)"), output one name per staff with the CORRECT key for each (e.g. "Horn in E" then "Horn in C").
-- German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl.=Cello, B./Kb./K-B./K.B.=Contrabass.
-{ocr_hint}There are exactly {n} staves. Output exactly {n} lines, one standard name per staff line, from top to bottom. No numbering, no extra text."""
+- If one label covers multiple numbered staves (e.g. "Hr." with two keys "(E)" and "(C)"), output one name per staff with the CORRECT key for each (e.g. "Horn:E" then "Horn:C").
+- German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl.=Cello, B./Kb./K-B./K.B.=Contrabass.
+{ocr_hint}There are exactly {n} staves. Output exactly {n} lines, one name per staff line, from top to bottom. No numbering, no extra text."""
 
 
-def _ocr_margin_labels(image, staff_left: float) -> str:
-    """Quick OCR scan of the left margin, returns sorted raw labels as a hint string."""
+def _ocr_margin_labels(image, staff_left: float,
+                       y_start: int = 0, y_end: int = None) -> str:
+    """Quick OCR scan of the left margin, returns sorted raw labels as a hint string.
+    Scans the full image for better detection, then filters by y_start/y_end."""
     from rapidocr_onnxruntime import RapidOCR
     ocr = RapidOCR()
     x_end = max(0, int(staff_left) - 5)
@@ -314,6 +412,8 @@ def _ocr_margin_labels(image, staff_left: float) -> str:
     result, _ = ocr(crop)
     if not result:
         return ""
+    if y_end is None:
+        y_end = image.shape[0]
     items = []
     for r in result:
         t = r[1].strip()
@@ -322,6 +422,9 @@ def _ocr_margin_labels(image, staff_left: float) -> str:
         if re.fullmatch(r'\d+', t):
             continue
         y_center = sum(p[1] for p in r[0]) / 4
+        kept = y_start <= y_center <= y_end
+        if not kept:
+            continue
         items.append((y_center, t))
     items.sort()
     if not items:
@@ -440,7 +543,14 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
     ocr_hint = ""
     if use_vlm:
         try:
-            ocr_hint = _ocr_margin_labels(image, staff_left)
+            sys1_y0 = max(0, int(first_system[0].min_y - avg_unit * 3))
+            if len(systems) > 1:
+                gap_y = (systems[0][-1].max_y + systems[1][0].min_y) // 2
+                sys1_y1 = int(gap_y)
+            else:
+                sys1_y1 = None
+            ocr_hint = _ocr_margin_labels(image, staff_left,
+                                          y_start=sys1_y0, y_end=sys1_y1)
             if ocr_hint:
                 print(f"[OCR→VLM] {ocr_hint.splitlines()[0][:120]}")
         except Exception as e:
@@ -450,7 +560,14 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
     if use_vlm:
         try:
             from PIL import Image as PILImage
-            pil_img = PILImage.fromarray(image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2RGB))
+            # Crop image to first system only so VLM doesn't see other systems
+            sys1_img_y0 = max(0, int(first_system[0].min_y - avg_unit * 4))
+            if len(systems) > 1:
+                sys1_img_y1 = int((systems[0][-1].max_y + systems[1][0].min_y) / 2)
+            else:
+                sys1_img_y1 = image.shape[0]
+            sys1_crop = image[sys1_img_y0:sys1_img_y1, :]
+            pil_img = PILImage.fromarray(sys1_crop if sys1_crop.ndim == 3 else cv2.cvtColor(sys1_crop, cv2.COLOR_GRAY2RGB))
             vlm_lines = _vlm_read_instrument_names(pil_img, n_staves=n_parts, ocr_hint=ocr_hint)
             print(f"[VLM] {len(vlm_lines)} names: {vlm_lines}")
 
@@ -1920,6 +2037,14 @@ def _inject_dynamics(xml_string: str, dynamics_list) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=False)
 
 
+def _display_name(name: str) -> str:
+    """Convert internal 'Clarinet:A' format to display 'Clarinet in A'."""
+    base, key = _parse_instrument_key(name)
+    if key:
+        return f"{base} in {key}"
+    return base
+
+
 def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
     """Replace generic part names and instrument encoding in the MusicXML."""
     try:
@@ -1934,11 +2059,12 @@ def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
     score_parts = part_list.findall("score-part")
     parts = root.findall("part")
     for idx, (sp, name) in enumerate(zip(score_parts, part_names)):
+        display = _display_name(name)
         pn = sp.find("part-name")
         if pn is not None:
-            pn.text = name
+            pn.text = display
         else:
-            ET.SubElement(sp, "part-name").text = name
+            ET.SubElement(sp, "part-name").text = display
 
         base = _instrument_base(name)
         sound, midi_prog = INSTRUMENT_MIDI.get(base, ("keyboard.piano", 1))
@@ -1947,7 +2073,7 @@ def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
         if si is not None:
             iname = si.find("instrument-name")
             if iname is not None:
-                iname.text = name
+                iname.text = display
             isound = si.find("instrument-sound")
             if isound is not None:
                 isound.text = sound
@@ -2935,9 +3061,10 @@ def _mark_unmarked_triplets(root):
                             int(main_notes[i + j][0].findtext("duration", "0"))
                             for j in range(run_len))
                         expected_triplet_total = round(run_len * expected_d * 2 / 3)
-                        if run_total == expected_triplet_total:
-                            _fix_triplet_durations(
-                                main_notes, entries, i, groups, expected_d)
+                        if abs(run_total - expected_triplet_total) <= groups:
+                            if run_total == expected_triplet_total:
+                                _fix_triplet_durations(
+                                    main_notes, entries, i, groups, expected_d)
                             total_marked += _apply_triplet_markup(
                                 main_notes, entries, i, groups)
                             i += run_len
@@ -3553,11 +3680,12 @@ def merge_pages(page_xmls: List[str], output_path: str):
 
     for mi, (name, occ) in enumerate(master_parts):
         pid = f"P{mi+1}"
-        display_name = f"{name} {occ+1}" if all_instruments[name] > 1 else name
+        dn = _display_name(name)
+        display_name = f"{dn} {occ+1}" if all_instruments[name] > 1 else dn
         sp = ET.SubElement(part_list_el, "score-part", id=pid)
         ET.SubElement(sp, "part-name").text = display_name
         si = ET.SubElement(sp, "score-instrument", id=f"{pid}-I1")
-        ET.SubElement(si, "instrument-name").text = name
+        ET.SubElement(si, "instrument-name").text = dn
         sound, midi_prog = INSTRUMENT_MIDI.get(_instrument_base(name), ("keyboard.piano", 1))
         ET.SubElement(si, "instrument-sound").text = sound
         midi_el = ET.SubElement(sp, "midi-instrument", id=f"{pid}-I1")
@@ -3765,7 +3893,10 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
     if len(results) == 1:
         xml_string, part_names = results[0]
         if part_names_override is not None:
-            part_names = part_names_override
+            if len(part_names_override) == len(part_names):
+                part_names = list(part_names_override)
+            else:
+                part_names = _match_override_to_detected(part_names_override, part_names, xml_string)
         xml_string = _inject_part_names(xml_string, part_names)
         xml_string = _cross_part_post_process(xml_string)
         with open(output_path, "w", encoding="utf-8") as f:
@@ -3774,6 +3905,11 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
         import tempfile
         temp_files = []
         for sys_idx, (xml_string, sys_names) in enumerate(results):
+            if part_names_override is not None and sys_idx == 0:
+                if len(part_names_override) == len(sys_names):
+                    sys_names = list(part_names_override)
+                else:
+                    sys_names = _match_override_to_detected(part_names_override, sys_names, xml_string)
             xml_string = _inject_part_names(xml_string, sys_names)
             xml_string = _cross_part_post_process(xml_string)
             base, ext = os.path.splitext(output_path)

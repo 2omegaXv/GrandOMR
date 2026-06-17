@@ -40,8 +40,18 @@ __pycache__/
 # Exploration scripts & images
 abc2musicxml.py
 run_legato.py
+run_brahms4*.py
+run_mahler7*.py
+run_pages_*.py
+dump_tromr_tokens.py
+tremolo_detect_*.py
+tremolo_matching.py
 visualize_oemer_pred.py
+visualize_oemer_detections.py
+visualize_homr_segnet.py
 audiveris_templates.py
+accidental_cnn.pth
+yolo26n.pt
 noise_sensitivity.png
 template_matching_demo.png
 templates_overview.png
