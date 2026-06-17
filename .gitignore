@@ -1,5 +1,6 @@
 # Outputs
 pipeline_output/
+outputs/
 audiveris_output/
 homr_output/
 homr_input/

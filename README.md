@@ -217,41 +217,76 @@ cp .env.example .env
 
 ## 使用方法
 
-### 单页识别
+### PDF 一键转换（推荐）
+
+`run_score.py` 是端到端的入口脚本，从 PDF 到最终合并的 MusicXML 一条龙完成：
 
 ```bash
+# 基本用法：PDF + 起止页号（1-based，闭区间）
+python run_score.py Bruckner7.pdf 1 3
+
+# 自定义输出路径
+python run_score.py Tchai1.pdf 3 5 -o tchai_mvt1.musicxml
+
+# 单页
+python run_score.py Brahms4.pdf 93 93
+
+# 更高分辨率（默认 300 DPI）
+python run_score.py score.pdf 1 10 --dpi 400
+```
+
+默认输出到 `outputs/{pdf名}_{起始页}_{结束页}.musicxml`，中间产物（逐页 PNG 和 MusicXML）存在 `outputs/{pdf名}/` 下。
+
+内部流程：
+1. `pdf2image` 将指定页渲染为 PNG
+2. 逐页调用 `run_pipeline`，自动跨页传播乐器名
+3. 多页时调用 `merge_pages` 合成最终 MusicXML
+
+| 参数 | 说明 |
+|---|---|
+| `pdf` | PDF 文件路径 |
+| `start` | 起始页号（1-based，包含） |
+| `end` | 结束页号（1-based，包含，等于 start 时只转一页） |
+| `-o, --output` | 输出 .musicxml 路径（默认 `outputs/{stem}_{start}_{end}.musicxml`） |
+| `--dpi` | PDF 渲染 DPI（默认 300） |
+| `--no-gpu` | 禁用 GPU 推理 |
+| `--no-vlm` | 禁用 VLM，使用 RapidOCR 识别乐器名 |
+
+### 底层接口：pipeline.py
+
+如果已有裁好的 PNG 页面图片，可以直接调用 `pipeline.py`：
+
+```bash
+# 单页识别
 python pipeline.py score_page.png -o output.musicxml --check
-```
 
-### 多页合并
-
-```bash
+# 多页合并（自动跨页传播乐器名）
 python pipeline.py page5.png page6.png page7.png -o merged.musicxml --check
-```
 
-多页模式会：
-1. 逐页独立运行完整 pipeline
-2. 取所有页面乐器的并集，按标准管弦乐顺序排列
-3. 归一化 divisions（LCM），拼接小节，缺席声部补空拍
+# 批量处理目录（不合并）
+python pipeline.py image_directory/ --check
+```
 
 ### 编程接口
 
 ```python
 from pipeline import run_pipeline, merge_pages
 
-# 指定乐器名（跳过 VLM/OCR 识别）
+# 单页，指定乐器名（跳过 VLM/OCR 识别）
 run_pipeline("page.png", "out.musicxml", part_names_override=[
-    "Flute", "Clarinet in A", "Horn in F", "Violin", ...
+    "Flute", "Clarinet:A", "Horn:F", "Violin", ...
 ])
+
+# 多页跨页传播
+detected_names = None
+for img in pages:
+    _, names = run_pipeline(img, out, part_names_override=detected_names)
+    if detected_names is None and names:
+        detected_names = names
+merge_pages(page_xmls, "merged.musicxml")
 ```
 
-### 批量处理（不合并）
-
-```bash
-python pipeline.py image_directory/ --check
-```
-
-### 参数
+pipeline.py 参数：
 
 | 参数 | 说明 |
 |---|---|
