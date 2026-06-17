@@ -17,6 +17,7 @@
               ▼
 ┌─────────────────────────────┐
 │  Stage 1.5: 乐器名识别       │  VLM API (Qwen3-VL) 主路径
+│             移调信息          │  识别 "in A/Bb/F" 等移调标记
 │                             │  RapidOCR + 缩写字典 备用路径
 └─────────────┬───────────────┘
               ▼
@@ -30,6 +31,13 @@
 │                             │  Layer 1: 拍号/调号多数投票对齐
 │                             │  Layer 2: 小节数统一
 │                             │  Layer 3: 时值修正（position tracking）
+│                             │  + 记谱溢出修复 / 三连音标记 / 双dot清理
+└─────────────┬───────────────┘
+              ▼
+┌─────────────────────────────┐
+│  Stage 4: 力度标记检测        │  RapidOCR 检测谱表下方力度文字
+│                             │  pp/p/mp/mf/f/ff/fff/sfz 等
+│                             │  定位到小节，注入 <direction> 元素
 └─────────────┬───────────────┘
               ▼
          MusicXML 输出
@@ -40,10 +48,27 @@
 | 功能 | HOMR | 本项目 |
 |---|---|---|
 | 乐器识别 | 无（Part 1, Part 2...） | VLM API + RapidOCR 缩写字典 |
+| 移调乐器 | 不支持 | 自动检测调性，注入 `<transpose>` 元素 |
+| 力度标记 | 不支持 | RapidOCR 检测 + 小节定位注入 |
 | 谱表分组 | 几何检测（密集总谱易出错） | OCR 确定声部数 → 强制均分 |
-| 跨声部校正 | 无 | 4 层后处理（拍号推断/对齐/结构/时值） |
+| 跨声部校正 | 无 | 多层后处理（拍号推断/对齐/结构/时值/溢出修复） |
 | 多页合并 | 不支持 | 乐器并集 + divisions 归一化 + 小节拼接 |
+| MIDI 音色 | 通用钢琴 | 按乐器分配正确的 instrument-sound 和 midi-program |
 | 鲁棒性 | 窄碎片崩溃 | 自动过滤 + 质量检查报告 |
+
+## 支持的移调乐器
+
+| 乐器 | 默认调 | MusicXML transpose |
+|---|---|---|
+| Clarinet in A | A | diatonic=-2, chromatic=-3 |
+| Clarinet in Bb | Bb | diatonic=-1, chromatic=-2 |
+| Clarinet in Eb | Eb | diatonic=2, chromatic=3 |
+| Bass Clarinet | Bb | diatonic=-1, chromatic=-2, octave-change=-1 |
+| Horn in F | F | diatonic=-4, chromatic=-7 |
+| English Horn | F | diatonic=-4, chromatic=-7 |
+| Trumpet in Bb | Bb | diatonic=-1, chromatic=-2 |
+
+VLM 会尝试从乐谱边栏读取调性（如 "Kl.A" → Clarinet in A）。未检测到调性时使用默认值。
 
 ## 安装
 
@@ -79,6 +104,17 @@ python pipeline.py page5.png page6.png page7.png -o merged.musicxml --check
 2. 取所有页面乐器的并集，按标准管弦乐顺序排列
 3. 归一化 divisions（LCM），拼接小节，缺席声部补空拍
 
+### 编程接口
+
+```python
+from pipeline import run_pipeline, merge_pages
+
+# 指定乐器名（跳过 VLM/OCR 识别）
+run_pipeline("page.png", "out.musicxml", part_names_override=[
+    "Flute", "Clarinet in A", "Horn in F", "Violin", ...
+])
+```
+
 ### 批量处理（不合并）
 
 ```bash
@@ -106,6 +142,6 @@ python pipeline.py image_directory/ --check
 
 ## 已知局限
 
-- **Tremolo 记谱**：TrOMR 无法识别 tremolo（成对黑块），产生空声部。这是模型训练数据的限制，无预处理方案。
-- **VLM 稳定性**：Qwen3-VL 偶尔对同一图片返回不同结果（已用 `temperature=0` 缓解）。多谱表共享 bracket 标注时偶尔计数不准。
+- **VLM 谱表计数**：VLM 偶尔将大括号内的谱表数数错（多或少 1），导致乐器名错位。可通过 `part_names_override` 手动指定乐器名绕过。
+- **Tremolo 记谱**：TrOMR 无法识别 tremolo（成对黑块），产生空声部。这是模型训练数据的限制。
 - **多页声部匹配**：依赖乐器名精确匹配。如果同一乐器在不同页面被 VLM 识别为不同名称，会被视为不同声部。

@@ -96,29 +96,79 @@ INSTRUMENT_ABBREVS = {
 }
 
 INSTRUMENT_MIDI = {
-    "Violin":       ("strings.violin",        41),
-    "Viola":        ("strings.viola",          42),
-    "Cello":        ("strings.cello",          43),
-    "Contrabass":   ("strings.contrabass",     44),
-    "Flute":        ("wind.flutes.flute",      74),
-    "Piccolo":      ("wind.flutes.flute.piccolo", 73),
-    "Oboe":         ("wind.reed.oboe",         69),
-    "English Horn": ("wind.reed.english-horn", 70),
-    "Clarinet":     ("wind.reed.clarinet",     72),
-    "Bass Clarinet": ("wind.reed.clarinet.bass", 72),
-    "Bassoon":      ("wind.reed.bassoon",      71),
-    "Contrabassoon": ("wind.reed.contrabassoon", 71),
-    "Horn":         ("brass.french-horn",      61),
-    "Trumpet":      ("brass.trumpet",          57),
-    "Trombone":     ("brass.trombone",          58),
-    "Tuba":         ("brass.tuba",             59),
-    "Bass Tuba":    ("brass.tuba",             59),
-    "Timpani":      ("percussion.timpani",     48),
-    "Bass Drum":    ("drum.bass-drum",         117),
-    "Harp":         ("pluck.harp",             47),
-    "Piano":        ("keyboard.piano",          1),
-    "Celesta":      ("keyboard.celesta",        9),
+    "Violin":       ("strings.violin",        40),
+    "Viola":        ("strings.viola",          41),
+    "Cello":        ("strings.cello",          42),
+    "Contrabass":   ("strings.contrabass",     43),
+    "Flute":        ("wind.flutes.flute",      73),
+    "Piccolo":      ("wind.flutes.flute.piccolo", 72),
+    "Oboe":         ("wind.reed.oboe",         68),
+    "English Horn": ("wind.reed.english-horn", 69),
+    "Clarinet":     ("wind.reed.clarinet",     71),
+    "Bass Clarinet": ("wind.reed.clarinet.bass", 71),
+    "Bassoon":      ("wind.reed.bassoon",      70),
+    "Contrabassoon": ("wind.reed.contrabassoon", 70),
+    "Horn":         ("brass.french-horn",      60),
+    "Trumpet":      ("brass.trumpet",          56),
+    "Trombone":     ("brass.trombone",          57),
+    "Tuba":         ("brass.tuba",             58),
+    "Bass Tuba":    ("brass.tuba",             58),
+    "Timpani":      ("drum.timpani",           47),
+    "Bass Drum":    ("drum.bass-drum",         116),
+    "Harp":         ("pluck.harp",             46),
+    "Piano":        ("keyboard.piano",          0),
+    "Celesta":      ("keyboard.celesta",        8),
 }
+
+# Transposition data: (instrument_base, key) → (diatonic, chromatic, octave-change)
+TRANSPOSE_TABLE = {
+    ("Clarinet", "A"):          (-2, -3, 0),
+    ("Clarinet", "Bb"):         (-1, -2, 0),
+    ("Clarinet", "Eb"):         (2,  3,  0),
+    ("Bass Clarinet", "Bb"):    (-1, -2, -1),
+    ("Horn", "F"):              (-4, -7, 0),
+    ("Trumpet", "Bb"):          (-1, -2, 0),
+    ("English Horn", "F"):      (-4, -7, 0),
+}
+
+DEFAULT_TRANSPOSE_KEY = {
+    "Clarinet": "Bb",
+    "Bass Clarinet": "Bb",
+    "Horn": "F",
+    "Trumpet": "Bb",
+    "English Horn": "F",
+}
+
+
+def _parse_instrument_key(name: str):
+    """'Clarinet in A' → ('Clarinet', 'A'); 'Horn' → ('Horn', None)."""
+    m = re.match(r'^(.+?)\s+in\s+([A-G](?:b|#)?)\s*$', name.strip())
+    if m:
+        return m.group(1).strip(), m.group(2)
+    return name.strip(), None
+
+
+def _instrument_base(name: str) -> str:
+    """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups."""
+    return _parse_instrument_key(name)[0]
+
+
+def _inject_transpose(attrs_el, instrument_name: str):
+    """Insert <transpose> child into an <attributes> element if the instrument transposes."""
+    base, key = _parse_instrument_key(instrument_name)
+    if key is None:
+        key = DEFAULT_TRANSPOSE_KEY.get(base)
+    if key is None:
+        return
+    tr = TRANSPOSE_TABLE.get((base, key))
+    if tr is None:
+        return
+    diatonic, chromatic, octave = tr
+    te = ET.SubElement(attrs_el, "transpose")
+    ET.SubElement(te, "diatonic").text = str(diatonic)
+    ET.SubElement(te, "chromatic").text = str(chromatic)
+    if octave != 0:
+        ET.SubElement(te, "octave-change").text = str(octave)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,8 +276,9 @@ def _group_staves_by_brackets(sorted_staffs, brace_dots):
 _VLM_PROMPT = """This is a page from an orchestral music score.
 On the left margin there are instrument names or abbreviations.
 Read each instrument name from top to bottom and output its standard English name.
-Use these standard names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
+Use these standard names: Flute, Piccolo, Oboe, English Horn, Clarinet in A, Clarinet in Bb, Clarinet in Eb, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn in F, Horn, Trumpet in Bb, Trumpet in C, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
 Important rules:
+- For transposing instruments (Clarinet, Horn, Trumpet), read the key from the score margin and include it. Examples: "Kl.A" or "Cl. in A" → "Clarinet in A", "Hr.F" → "Horn in F", "Trp.B" → "Trumpet in Bb", "BKl." or "Bkl." → "Bass Clarinet". German "B" means Bb (B-flat). If no key is visible, output just the base name (e.g. "Clarinet").
 - If a bracket groups two staves under one label (e.g. "Pos." with "1/2" and "3"), output the SAME name for EACH staff in that bracket.
 - If one label covers multiple numbered staves (e.g. "Hr.F" with "1/3" and "2/4"), output the same name for each.
 - German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass.
@@ -322,20 +373,11 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
     sorted_staffs = sorted(homr_staffs, key=lambda s: s.min_y)
     avg_unit = float(np.median([s.average_unit_size for s in sorted_staffs]))
 
-    # Detect system boundaries
-    gaps = []
-    for i in range(1, len(sorted_staffs)):
-        gaps.append(sorted_staffs[i].min_y - sorted_staffs[i-1].max_y)
-    if gaps:
-        median_gap = float(np.median(gaps))
-        system_break_threshold = max(median_gap * 2.0, avg_unit * 6)
+    # Detect system boundaries using brackets
+    if brace_dots is not None:
+        systems = _detect_system_breaks(sorted_staffs, brace_dots)
     else:
-        system_break_threshold = float('inf')
-    systems = [[sorted_staffs[0]]]
-    for i in range(1, len(sorted_staffs)):
-        if gaps[i-1] > system_break_threshold:
-            systems.append([])
-        systems[-1].append(sorted_staffs[i])
+        systems = [list(sorted_staffs)]
 
     n_parts = len(systems[0])
     first_system = systems[0]
@@ -360,7 +402,7 @@ def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vl
             if len(vlm_lines) == n_parts:
                 # Validate: names should be from our known set
                 known_instruments = set(INSTRUMENT_MIDI.keys())
-                valid = sum(1 for n in vlm_lines if n in known_instruments)
+                valid = sum(1 for n in vlm_lines if _instrument_base(n) in known_instruments)
                 if valid >= n_parts * 0.5:
                     print(f"[VLM] Direct match: {valid}/{n_parts} known instruments")
                     return vlm_lines
@@ -507,13 +549,1033 @@ def _rapidocr_instrument_names(first_system, image, bracket_groups, n_parts, avg
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Tremolo detection via template matching
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_tremolo_templates(template_dir):
+    """Load tremolo_tight_*.png templates from directory."""
+    import glob as _glob
+    paths = sorted(_glob.glob(os.path.join(template_dir, "tremolo_tight_*.png")))
+    templates = []
+    for p in paths:
+        idx = int(os.path.basename(p).split("_")[-1].split(".")[0])
+        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            templates.append({"idx": idx, "img": img, "h": img.shape[0], "w": img.shape[1]})
+    return templates
+
+
+def detect_tremolo(full_image, template_dir, threshold=0.75):
+    """Detect tremolo marks via template matching on the full-res image.
+    Returns list of (cx, cy, w, h, score) in full-res pixel coordinates."""
+    templates = _load_tremolo_templates(template_dir)
+    if not templates:
+        return []
+
+    if len(full_image.shape) == 3:
+        gray = cv2.cvtColor(full_image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = full_image
+
+    scales = [0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15]
+    all_dets = []
+    for tmpl in templates:
+        for scale in scales:
+            tw = max(5, int(tmpl["w"] * scale))
+            th = max(5, int(tmpl["h"] * scale))
+            if th > gray.shape[0] or tw > gray.shape[1]:
+                continue
+            resized = cv2.resize(tmpl["img"], (tw, th), interpolation=cv2.INTER_AREA)
+            result = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+            locs = np.where(result >= threshold)
+            for py, px in zip(*locs):
+                all_dets.append((px, py, tw, th, float(result[py, px])))
+
+    # NMS
+    if not all_dets:
+        return []
+    boxes = np.array([[d[0], d[1], d[0]+d[2], d[1]+d[3]] for d in all_dets])
+    scores = np.array([d[4] for d in all_dets])
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        w = np.maximum(0, xx2 - xx1)
+        h = np.maximum(0, yy2 - yy1)
+        inter = w * h
+        union = areas[i] + areas[order[1:]] - inter
+        iou = np.where(union > 0, inter / union, 0)
+        order = order[np.where(iou <= 0.3)[0] + 1]
+    dets = [all_dets[i] for i in keep]
+
+    results = []
+    for d in dets:
+        cx = d[0] + d[2] / 2.0
+        cy = d[1] + d[3] / 2.0
+        results.append((cx, cy, d[2], d[3], d[4]))
+    return results
+
+
+def match_tremolo_to_noteheads(tremolo_dets, noteheads, staffs_sorted, coord_scale):
+    """Match each tremolo detection to nearest notehead within a 3x3 grid.
+    tremolo_dets: list of (cx, cy, w, h, score) in full-res coords.
+    noteheads: list of BoundingEllipse in HOMR-resized coords.
+    coord_scale: full_res / homr_res ratio.
+    Returns list of (staff_index, notehead_cx_homr, notehead_cy_homr, tremolo_score)."""
+    results = []
+    for tcx, tcy, tw, th, tscore in tremolo_dets:
+        # 3x3 grid around tremolo box: notehead center must be within 1.5 * box dimension
+        search_rx = tw * 1.5
+        search_ry = th * 1.5
+
+        best_nh = None
+        best_dist = float("inf")
+        for nh in noteheads:
+            # notehead center is in HOMR space, scale to full-res
+            nhx = nh.center[0] * coord_scale
+            nhy = nh.center[1] * coord_scale
+            dx = abs(nhx - tcx)
+            dy = abs(nhy - tcy)
+            if dx > search_rx or dy > search_ry:
+                continue
+            dist = dx * dx + dy * dy
+            if dist < best_dist:
+                best_dist = dist
+                best_nh = nh
+
+        if best_nh is None:
+            continue
+
+        # Find which staff this notehead belongs to
+        nh_cy = best_nh.center[1]  # HOMR space
+        best_si, best_sdist = -1, float("inf")
+        for si, staff in enumerate(staffs_sorted):
+            staff_cy = (staff.min_y + staff.max_y) / 2
+            sdist = abs(nh_cy - staff_cy)
+            if sdist < best_sdist:
+                best_sdist = sdist
+                best_si = si
+
+        if best_si >= 0:
+            results.append((best_si, best_nh.center[0], best_nh.center[1], tscore))
+    return results
+
+
+def inject_tremolo(result_staffs, matched_tremolo, staffs_sorted):
+    """Inject tremolo articulation into the nearest note EncodedSymbol.
+    matched_tremolo: list of (staff_index, nh_cx_homr, nh_cy_homr, score).
+    Uses notehead position in HOMR space → canvas space → match to EncodedSymbol."""
+    from collections import defaultdict
+    import math
+
+    by_staff = defaultdict(list)
+    for si, nhx, nhy, score in matched_tremolo:
+        by_staff[si].append((nhx, nhy, score))
+
+    n_injected = 0
+    for si, det_list in by_staff.items():
+        if si >= len(result_staffs):
+            continue
+        staff = staffs_sorted[si]
+        symbols = result_staffs[si]
+
+        unit = staff.average_unit_size
+        region_x_min = staff.min_x - 2 * unit
+        region_x_max = staff.max_x + 2 * unit
+        region_w = region_x_max - region_x_min
+
+        canvas_w = 1280.0
+        scale = canvas_w / region_w
+
+        for nhx, nhy, score in det_list:
+            canvas_x = (nhx - region_x_min) * scale
+
+            best_idx, best_dist = -1, float("inf")
+            for idx, sym in enumerate(symbols):
+                if not sym.rhythm.startswith("note_"):
+                    continue
+                if sym.coordinates is None:
+                    continue
+                if math.isnan(sym.coordinates[0]):
+                    continue
+                dist = abs(sym.coordinates[0] - canvas_x)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+
+            tolerance = 60.0
+            if best_idx >= 0 and best_dist < tolerance:
+                sym = symbols[best_idx]
+                if "tremolo" not in sym.articulation:
+                    if sym.articulation == "." or sym.articulation == "":
+                        sym.articulation = "tremolo"
+                    else:
+                        sym.articulation = sym.articulation + "_tremolo"
+                    n_injected += 1
+
+    return n_injected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dynamics detection via Bravura template matching
+# ══════════════════════════════════════════════════════════════════════════════
+
+_DYNAMICS_SMUFL = {
+    'ff':  0xE52F, 'f':   0xE522, 'sf':  0xE536, 'p':   0xE520,
+    'pp':  0xE52B, 'mf':  0xE52D, 'mp':  0xE52C, 'fff': 0xE530,
+    'ppp': 0xE52A, 'sfz': 0xE539, 'sfp': 0xE537, 'fp':  0xE534,
+    'fz':  0xE535, 'rfz': 0xE53C,
+}
+
+# Search order: longest first so NMS prefers multi-char matches
+_DYN_SEARCH_ORDER = ['fff', 'ppp', 'sfz', 'sfp', 'rfz', 'ff', 'pp', 'mf',
+                     'mp', 'sf', 'fp', 'fz', 'f', 'p']
+
+_dyn_template_cache = {}
+
+
+def _render_dyn_template(codepoint, font_size, squeeze):
+    from PIL import Image as PILImage, ImageFont, ImageDraw
+    key = (codepoint, font_size, squeeze)
+    if key in _dyn_template_cache:
+        return _dyn_template_cache[key]
+    font = ImageFont.truetype(BRAVURA_FONT_PATH, font_size)
+    ch = chr(codepoint)
+    bbox = font.getbbox(ch)
+    if bbox[2] - bbox[0] < 2:
+        _dyn_template_cache[key] = None
+        return None
+    w, h = bbox[2] - bbox[0] + 16, bbox[3] - bbox[1] + 16
+    img = PILImage.new('L', (w, h), 255)
+    ImageDraw.Draw(img).text((8 - bbox[0], 8 - bbox[1]), ch, font=font, fill=0)
+    arr = np.array(img)
+    coords = np.where(arr < 200)
+    if len(coords[0]) == 0:
+        _dyn_template_cache[key] = None
+        return None
+    arr = arr[max(0, coords[0].min()-1):coords[0].max()+2,
+              max(0, coords[1].min()-1):coords[1].max()+2]
+    new_h = max(5, int(arr.shape[0] * squeeze))
+    arr = cv2.resize(arr, (arr.shape[1], new_h), interpolation=cv2.INTER_AREA)
+    _dyn_template_cache[key] = arr
+    return arr
+
+
+def detect_dynamics(staffs_sorted, img_path, bar_line_boxes, homr_shape):
+    """Detect dynamics markings below each staff via Bravura template matching.
+
+    Returns list of (staff_index, measure_1based, note_index, dynamic_type)
+    where note_index is the 0-based index of the nearest note in that measure.
+    """
+    full_image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if full_image is None:
+        return []
+    full_h, full_w = full_image.shape[:2]
+    homr_h, homr_w = homr_shape[:2]
+    coord_scale = full_w / homr_w
+
+    results = []
+
+    # Calibrate font sizes from first staff's unit size
+    unit0 = float(np.median([s.average_unit_size for s in staffs_sorted]))
+    target_h = 2.0 * unit0 * coord_scale
+    # Find base font size where template height ≈ target after 0.8 squeeze
+    base_sz = int(target_h / 0.8 * (56 / 30))  # empirical ratio from Bravura
+    base_sz = max(40, min(base_sz, 72))
+    font_sizes = [base_sz - 8, base_sz - 4, base_sz, base_sz + 4, base_sz + 8]
+    squeezes = [0.70, 0.80, 0.90]
+
+    # Only search common dynamics to reduce computation
+    search_dyns = ['ff', 'sf', 'f', 'p', 'pp', 'mf', 'sfz', 'fff', 'ppp', 'fp']
+
+    for si, staff in enumerate(staffs_sorted):
+        unit = staff.average_unit_size
+        # Crop from bottom of staff to 75% of gap to next staff
+        y_top_homr = staff.max_y
+        if si + 1 < len(staffs_sorted):
+            next_min_y = staffs_sorted[si + 1].min_y
+            gap = next_min_y - staff.max_y
+            if gap < 2 * unit:
+                continue
+            y_bot_homr = staff.max_y + gap * 0.75
+        else:
+            y_bot_homr = min(staff.max_y + 6 * unit, homr_h)
+
+        y1 = max(0, int(y_top_homr * coord_scale))
+        y2 = min(full_h, int(y_bot_homr * coord_scale))
+        x1 = max(0, int(staff.min_x * coord_scale))
+        x2 = min(full_w, int(staff.max_x * coord_scale))
+        if y2 - y1 < 15 or x2 - x1 < 20:
+            continue
+
+        crop = full_image[y1:y2, x1:x2]
+
+        all_dets = []
+
+        for dyn_name in search_dyns:
+            cp = _DYNAMICS_SMUFL[dyn_name]
+            best_peaks = {}
+
+            for sz in font_sizes:
+                for sq in squeezes:
+                    tmpl = _render_dyn_template(cp, sz, sq)
+                    if tmpl is None:
+                        continue
+                    th, tw = tmpl.shape
+                    if th > crop.shape[0] or tw > crop.shape[1]:
+                        continue
+
+                    r = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
+                    locs = np.where(r > 0.75)
+                    for py, px in zip(*locs):
+                        score = float(r[py, px])
+                        bucket = int(px / 20)
+                        if bucket not in best_peaks or score > best_peaks[bucket][1]:
+                            best_peaks[bucket] = (int(px), score, tw)
+
+            for _, (px, score, tw) in best_peaks.items():
+                all_dets.append((px, dyn_name, score, tw))
+
+        # NMS: highest score wins; at equal score prefer longer name
+        all_dets.sort(key=lambda d: (-d[2], -len(d[1])))
+        final = []
+        for x, dyn, score, tw in all_dets:
+            if any(abs(x - fx) < max(tw, fw) * 0.8 for fx, _, _, fw in final):
+                continue
+            final.append((x, dyn, score, tw))
+
+        # Map crop x to HOMR x, then to measure and nearest note
+        staff_barlines = []
+        for bl in bar_line_boxes:
+            bl_cy = bl.center[1]
+            if staff.min_y - unit <= bl_cy <= staff.max_y + unit:
+                staff_barlines.append(bl.center[0])
+        staff_barlines.sort()
+
+        note_xs = sorted([n.center[0] for n in staff.get_notes()])
+        measure_edges = [staff.min_x] + staff_barlines + [staff.max_x]
+
+        for x_crop, dyn, score, tw in final:
+            x_homr = (x_crop + x1) / coord_scale
+            measure = 1
+            for bi, bx in enumerate(staff_barlines):
+                if x_homr > bx:
+                    measure = bi + 2
+
+            m_lo = measure_edges[measure - 1] if measure - 1 < len(measure_edges) else staff.min_x
+            m_hi = measure_edges[measure] if measure < len(measure_edges) else staff.max_x
+            notes_in_m = [nx for nx in note_xs if m_lo <= nx <= m_hi]
+            note_idx = 0
+            if notes_in_m:
+                dists = [abs(nx - x_homr) for nx in notes_in_m]
+                note_idx = dists.index(min(dists))
+            results.append((si, measure, note_idx, dyn))
+
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Key signature correction via accidental template matching
+# ══════════════════════════════════════════════════════════════════════════════
+
+BRAVURA_FONT_PATH = os.path.join(
+    os.path.dirname(__file__), "audiveris", "app", "res", "Bravura.otf"
+)
+
+ACCIDENTAL_CODEPOINTS = {
+    "flat":    0xE260,
+    "natural": 0xE261,
+    "sharp":   0xE262,
+}
+
+
+def _render_glyph(font_path, codepoint, font_size):
+    """Render a single SMuFL glyph, return binary image (white-on-black)."""
+    from PIL import Image as PILImage, ImageFont, ImageDraw
+
+    font = ImageFont.truetype(font_path, font_size)
+    ch = chr(codepoint)
+    dummy = PILImage.new("L", (1, 1), 255)
+    draw = ImageDraw.Draw(dummy)
+    bbox = draw.textbbox((0, 0), ch, font=font)
+    w = bbox[2] - bbox[0] + 4
+    h = bbox[3] - bbox[1] + 4
+    if w < 3 or h < 3:
+        return None
+    img = PILImage.new("L", (w, h), 255)
+    draw = ImageDraw.Draw(img)
+    draw.text((2 - bbox[0], 2 - bbox[1]), ch, font=font, fill=0)
+    arr = np.array(img)
+    _, binary = cv2.threshold(arr, 128, 255, cv2.THRESH_BINARY_INV)
+    coords = cv2.findNonZero(binary)
+    if coords is None:
+        return None
+    x, y, cw, ch2 = cv2.boundingRect(coords)
+    return binary[y:y+ch2, x:x+cw]
+
+
+def render_accidental_templates(unit_size):
+    """Render flat/natural/sharp templates at multiple font sizes scaled to unit_size.
+    Returns dict: {accidental_name: [list of grayscale template images (dark on white)]}."""
+    base_font_size = int(unit_size * 4.5)
+    templates = {}
+    for name, cp in ACCIDENTAL_CODEPOINTS.items():
+        tmpls = []
+        for scale in [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]:
+            fs = max(12, int(base_font_size * scale))
+            t = _render_glyph(BRAVURA_FONT_PATH, cp, fs)
+            if t is not None:
+                tmpls.append(255 - t)
+        templates[name] = tmpls
+    return templates
+
+
+def detect_double_barlines(staff, bar_line_boxes):
+    """Find double barline x-positions for a given staff from raw barline boxes.
+    bar_line_boxes: list of RotatedBoundingBox from HOMR barline detection.
+    Returns list of x-coordinates (HOMR space) for each double barline found.
+    Detects both: (a) two separate close boxes, (b) single wide merged box."""
+    unit = staff.average_unit_size
+    margin = unit * 2
+    staff_bls = []
+    for bl in bar_line_boxes:
+        cy = bl.center[1]
+        cx = bl.center[0]
+        if (staff.min_y - margin <= cy <= staff.max_y + margin
+                and staff.min_x <= cx <= staff.max_x):
+            staff_bls.append(bl)
+
+    if not staff_bls:
+        return []
+    staff_bls.sort(key=lambda b: b.center[0])
+    double_barline_xs = []
+    used = set()
+
+    # (a) Two separate close barline boxes
+    for i in range(len(staff_bls) - 1):
+        if i in used:
+            continue
+        b1 = staff_bls[i]
+        b2 = staff_bls[i + 1]
+        dx = abs(b2.center[0] - b1.center[0])
+        if dx < unit * 1.5:
+            right_x = max(b1.center[0] + b1.size[0] / 2,
+                          b2.center[0] + b2.size[0] / 2)
+            double_barline_xs.append(right_x)
+            used.add(i)
+            used.add(i + 1)
+
+    # (b) Single wide barline (merged double barline)
+    # Normal single barlines are 3-5px; double barlines merged are 8-12px
+    width_threshold = max(7, unit * 0.9)
+    for i, bl in enumerate(staff_bls):
+        if i in used:
+            continue
+        if bl.size[0] >= width_threshold:
+            right_x = bl.center[0] + bl.size[0] / 2
+            double_barline_xs.append(right_x)
+            used.add(i)
+
+    return sorted(double_barline_xs)
+
+
+def _match_accidental_templates(gray_crop, templates_list, threshold=0.7):
+    """Match a list of template images against a gray crop.
+    Returns list of (cx, cy, w, h, score)."""
+    all_dets = []
+    for tmpl in templates_list:
+        th, tw = tmpl.shape[:2]
+        if th > gray_crop.shape[0] or tw > gray_crop.shape[1]:
+            continue
+        result = cv2.matchTemplate(gray_crop, tmpl, cv2.TM_CCOEFF_NORMED)
+        locs = np.where(result >= threshold)
+        for py, px in zip(*locs):
+            score = float(result[py, px])
+            cx = px + tw / 2
+            cy = py + th / 2
+            all_dets.append((cx, cy, tw, th, score))
+    return all_dets
+
+
+def _nms_accidentals(detections, iou_threshold=0.3):
+    """NMS for accidental detections. Input: list of (cx, cy, w, h, score)."""
+    if not detections:
+        return []
+    boxes = np.array([[d[0] - d[2]/2, d[1] - d[3]/2,
+                       d[0] + d[2]/2, d[1] + d[3]/2] for d in detections])
+    scores = np.array([d[4] for d in detections])
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        w = np.maximum(0, xx2 - xx1)
+        h = np.maximum(0, yy2 - yy1)
+        inter = w * h
+        union = areas[i] + areas[order[1:]] - inter
+        iou = np.where(union > 0, inter / union, 0)
+        inds = np.where(iou <= iou_threshold)[0]
+        order = order[inds + 1]
+    return [detections[i] for i in keep]
+
+
+def detect_accidentals_in_region(gray_crop, accidental_templates, threshold=0.7):
+    """Detect flat/natural/sharp counts in a cropped region.
+    Uses a stricter threshold for flat/sharp to reduce false positives.
+    Returns dict: {'flat': N, 'natural': N, 'sharp': N}."""
+    thresholds = {"natural": threshold, "flat": threshold + 0.05, "sharp": threshold + 0.05}
+    counts = {}
+    for name, tmpls in accidental_templates.items():
+        t = thresholds.get(name, threshold)
+        dets = _match_accidental_templates(gray_crop, tmpls, t)
+        dets = _nms_accidentals(dets)
+        counts[name] = len(dets)
+    return counts
+
+
+# ── Accidental CNN classifier ──────────────────────────────────────────────
+
+import torch
+import torch.nn as nn
+
+ACCIDENTAL_CLASSES = ["flat", "natural", "sharp"]
+ACCIDENTAL_CNN_PATH = os.path.join(os.path.dirname(__file__), "accidental_cnn.pth")
+_ACCIDENTAL_CNN_PATCH_H = 32
+_ACCIDENTAL_CNN_PATCH_W = 24
+
+
+class AccidentalCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.classifier = nn.Linear(64, len(ACCIDENTAL_CLASSES))
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
+
+def _generate_accidental_data(n_per_class=2000, seed=42):
+    """Generate synthetic training patches from Bravura font with augmentation."""
+    rng = np.random.RandomState(seed)
+    H, W = _ACCIDENTAL_CNN_PATCH_H, _ACCIDENTAL_CNN_PATCH_W
+    images, labels = [], []
+
+    for cls_idx, (name, cp) in enumerate(ACCIDENTAL_CODEPOINTS.items()):
+        for _ in range(n_per_class):
+            font_size = rng.randint(28, 51)
+            glyph = _render_glyph(BRAVURA_FONT_PATH, cp, font_size)
+            if glyph is None:
+                continue
+
+            gh, gw = glyph.shape
+            scale = rng.uniform(0.7, 1.3)
+            new_h = max(5, int(gh * scale))
+            new_w = max(3, int(gw * scale))
+            glyph = cv2.resize(glyph, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            gh, gw = glyph.shape
+
+            canvas = np.full((H, W), 255, dtype=np.uint8)
+            if gh > H or gw > W:
+                glyph = cv2.resize(glyph, (min(gw, W - 2), min(gh, H - 2)))
+                gh, gw = glyph.shape
+
+            max_y = max(0, H - gh)
+            max_x = max(0, W - gw)
+            oy = rng.randint(0, max_y + 1)
+            ox = rng.randint(0, max_x + 1)
+            canvas[oy:oy+gh, ox:ox+gw] = np.minimum(
+                canvas[oy:oy+gh, ox:ox+gw],
+                255 - glyph
+            )
+
+            line_spacing = rng.randint(5, 11)
+            line_start = rng.randint(0, max(1, line_spacing))
+            line_thickness = rng.choice([1, 1, 1, 2])
+            y = line_start
+            while y < H:
+                canvas[y:min(H, y+line_thickness), :] = 255
+                y += line_spacing
+
+            if rng.rand() < 0.5:
+                k = rng.choice([3, 3, 5])
+                canvas = cv2.GaussianBlur(canvas, (k, k), rng.uniform(0.3, 1.0))
+
+            noise_sigma = rng.uniform(0, 15)
+            if noise_sigma > 1:
+                noise = rng.randn(H, W) * noise_sigma
+                canvas = np.clip(canvas.astype(float) + noise, 0, 255).astype(np.uint8)
+
+            if rng.rand() < 0.3:
+                kern = np.ones((2, 2), np.uint8)
+                canvas = cv2.erode(canvas, kern, iterations=1)
+            elif rng.rand() < 0.3:
+                kern = np.ones((2, 2), np.uint8)
+                canvas = cv2.dilate(canvas, kern, iterations=1)
+
+            alpha = rng.uniform(0.7, 1.3)
+            beta = rng.uniform(-20, 20)
+            canvas = np.clip(canvas.astype(float) * alpha + beta, 0, 255).astype(np.uint8)
+
+            images.append(canvas)
+            labels.append(cls_idx)
+
+    images = np.array(images, dtype=np.float32) / 255.0
+    labels = np.array(labels, dtype=np.int64)
+    return images, labels
+
+
+def _train_accidental_cnn(save_path=None, n_per_class=2000, epochs=30, lr=1e-3):
+    """Train the AccidentalCNN on synthetic data and save weights."""
+    if save_path is None:
+        save_path = ACCIDENTAL_CNN_PATH
+
+    print("[AccidentalCNN] Generating training data...")
+    images, labels = _generate_accidental_data(n_per_class=n_per_class)
+
+    perm = np.random.RandomState(0).permutation(len(images))
+    images, labels = images[perm], labels[perm]
+    split = int(0.8 * len(images))
+    train_x, val_x = images[:split], images[split:]
+    train_y, val_y = labels[:split], labels[split:]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AccidentalCNN().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+    batch_size = 128
+
+    train_x_t = torch.from_numpy(train_x).unsqueeze(1).to(device)
+    train_y_t = torch.from_numpy(train_y).to(device)
+    val_x_t = torch.from_numpy(val_x).unsqueeze(1).to(device)
+    val_y_t = torch.from_numpy(val_y).to(device)
+
+    for epoch in range(epochs):
+        model.train()
+        perm_idx = torch.randperm(len(train_x_t))
+        total_loss = 0
+        n_batches = 0
+        for i in range(0, len(train_x_t), batch_size):
+            idx = perm_idx[i:i+batch_size]
+            out = model(train_x_t[idx])
+            loss = criterion(out, train_y_t[idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
+
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            model.eval()
+            with torch.no_grad():
+                val_out = model(val_x_t)
+                val_pred = val_out.argmax(dim=1)
+                val_acc = (val_pred == val_y_t).float().mean().item()
+            print(f"  Epoch {epoch+1:2d}: loss={total_loss/n_batches:.4f} val_acc={val_acc:.3f}")
+
+    model.eval()
+    with torch.no_grad():
+        val_out = model(val_x_t)
+        val_pred = val_out.argmax(dim=1)
+        val_acc = (val_pred == val_y_t).float().mean().item()
+        for ci, cn in enumerate(ACCIDENTAL_CLASSES):
+            mask = val_y_t == ci
+            if mask.sum() > 0:
+                acc = (val_pred[mask] == ci).float().mean().item()
+                print(f"  {cn}: {acc:.3f} ({mask.sum().item()} samples)")
+
+    torch.save(model.state_dict(), save_path)
+    print(f"[AccidentalCNN] Saved to {save_path} (val_acc={val_acc:.3f})")
+    return model
+
+
+_accidental_cnn_cache = None
+
+
+def _load_accidental_cnn():
+    """Load or train the accidental CNN. Caches in memory."""
+    global _accidental_cnn_cache
+    if _accidental_cnn_cache is not None:
+        return _accidental_cnn_cache
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AccidentalCNN().to(device)
+
+    if os.path.exists(ACCIDENTAL_CNN_PATH):
+        model.load_state_dict(torch.load(ACCIDENTAL_CNN_PATH, map_location=device))
+        model.eval()
+    else:
+        model = _train_accidental_cnn(ACCIDENTAL_CNN_PATH)
+        model = model.to(device)
+        model.eval()
+
+    _accidental_cnn_cache = model
+    return model
+
+
+def _classify_accidental_patch(model, gray_patch):
+    """Classify a single grayscale patch. Returns (class_name, confidence)."""
+    H, W = _ACCIDENTAL_CNN_PATCH_H, _ACCIDENTAL_CNN_PATCH_W
+    patch = cv2.resize(gray_patch, (W, H), interpolation=cv2.INTER_AREA)
+    tensor = torch.from_numpy(patch.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
+    device = next(model.parameters()).device
+    tensor = tensor.to(device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probs = torch.softmax(logits, dim=1)
+        cls_idx = probs.argmax(dim=1).item()
+        conf = probs[0, cls_idx].item()
+    return ACCIDENTAL_CLASSES[cls_idx], conf
+
+
+def correct_key_signatures(result_staffs, staffs_sorted, original_image, bar_line_boxes,
+                           full_res_image=None):
+    """Detect double barlines, classify accidentals with CNN in key change zones,
+    and correct keySignature tokens in EncodedSymbol sequences.
+
+    result_staffs: list[list[EncodedSymbol]] from parse_staffs()
+    staffs_sorted: list[Staff] (HOMR staff objects)
+    original_image: HOMR-resolution image (BGR or grayscale)
+    bar_line_boxes: list[RotatedBoundingBox] from HOMR barline detection
+    full_res_image: full-resolution page image for CNN classification (optional;
+                    if None, falls back to original_image)
+    """
+    import math
+    from collections import Counter
+
+    if len(original_image.shape) == 3:
+        gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = original_image
+    img_h, img_w = gray.shape[:2]
+
+    if full_res_image is not None:
+        if len(full_res_image.shape) == 3:
+            gray_full = cv2.cvtColor(full_res_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_full = full_res_image
+        coord_scale = gray_full.shape[1] / img_w
+    else:
+        gray_full = gray
+        coord_scale = 1.0
+
+    full_h, full_w = gray_full.shape[:2]
+
+    if not staffs_sorted:
+        return 0
+
+    unit = float(np.median([s.average_unit_size for s in staffs_sorted]))
+    acc_templates = render_accidental_templates(unit)
+
+    # ── Consensus double barline: find the most common x across all staves ──
+    all_valid_staffs = [s for s in staffs_sorted if s.max_x - s.min_x >= 100]
+    all_dbl_xs = []
+    for s in all_valid_staffs:
+        dxs = detect_double_barlines(s, bar_line_boxes)
+        all_dbl_xs.extend(dxs)
+
+    if not all_dbl_xs:
+        return 0
+
+    rounded = [round(x / 5) * 5 for x in all_dbl_xs]
+    most_common_x = Counter(rounded).most_common(1)[0][0]
+    consensus_xs = [x for x in all_dbl_xs if abs(round(x / 5) * 5 - most_common_x) <= 20]
+    if not consensus_xs:
+        return 0
+    consensus_dbl_x = float(np.median(consensus_xs))
+
+    # ── Load CNN classifier ──
+    cnn = _load_accidental_cnn()
+
+    n_corrected = 0
+    for si, staff in enumerate(staffs_sorted):
+        if si >= len(result_staffs):
+            break
+        if staff.max_x - staff.min_x < 100:
+            continue
+
+        u = staff.average_unit_size
+
+        # Check this staff has a double barline near consensus
+        staff_dbl_xs = detect_double_barlines(staff, bar_line_boxes)
+        dbl_x = None
+        for dx in staff_dbl_xs:
+            if abs(dx - consensus_dbl_x) <= 3 * u:
+                dbl_x = dx
+                break
+        if dbl_x is None:
+            if abs(consensus_dbl_x - staff.max_x) < staff.max_x * 0.5:
+                dbl_x = consensus_dbl_x
+            else:
+                continue
+
+        # ── Crop key change zone at HOMR res for candidate detection ──
+        x1 = int(max(0, dbl_x))
+        x2 = int(min(img_w, dbl_x + 12 * u))
+        y1 = int(max(0, staff.min_y - u))
+        y2 = int(min(img_h, staff.max_y + u))
+        if x2 <= x1 + 5 or y2 <= y1 + 5:
+            continue
+
+        crop = gray[y1:y2, x1:x2]
+
+        # ── Find candidate accidental positions via template matching ──
+        all_cand = _match_accidental_templates(crop, acc_templates["natural"], 0.55)
+        all_cand = _nms_accidentals(all_cand)
+
+        if len(all_cand) < 2:
+            continue
+
+        # ── Crop key change zone at full res for CNN classification ──
+        fx1 = int(max(0, x1 * coord_scale))
+        fx2 = int(min(full_w, x2 * coord_scale))
+        fy1 = int(max(0, y1 * coord_scale))
+        fy2 = int(min(full_h, y2 * coord_scale))
+        crop_full = gray_full[fy1:fy2, fx1:fx2]
+
+        # ── Classify each candidate with CNN using full-res patches ──
+        u_full = u * coord_scale
+        patch_h = int(u_full * 2.5)
+        patch_w = int(u_full * 1.8)
+        counts = {"flat": 0, "natural": 0, "sharp": 0}
+
+        for cx, cy, tw, th, score in all_cand:
+            fcx = cx * coord_scale
+            fcy = cy * coord_scale
+            px1 = int(max(0, fcx - patch_w / 2))
+            py1 = int(max(0, fcy - patch_h / 2))
+            px2 = int(min(crop_full.shape[1], fcx + patch_w / 2))
+            py2 = int(min(crop_full.shape[0], fcy + patch_h / 2))
+            if px2 - px1 < 6 or py2 - py1 < 10:
+                continue
+
+            patch = crop_full[py1:py2, px1:px2]
+            cls_name, conf = _classify_accidental_patch(cnn, patch)
+            if conf >= 0.5:
+                counts[cls_name] += 1
+
+        n_nat = counts["natural"]
+        n_flat = counts["flat"]
+        n_sharp = counts["sharp"]
+
+        if n_nat < 2:
+            continue
+
+        new_fifths = n_sharp - n_flat
+
+        # ── Find the keySignature token to modify ──
+        symbols = result_staffs[si]
+        region_xmin = staff.min_x - 2 * u
+        region_w = (staff.max_x + 2 * u) - region_xmin
+        canvas_dbl_x = (dbl_x - region_xmin) / region_w * 1280
+
+        best_idx = -1
+        best_dist = float("inf")
+        for idx, sym in enumerate(symbols):
+            if not sym.rhythm.startswith("keySignature_"):
+                continue
+            if sym.coordinates is None or math.isnan(sym.coordinates[0]):
+                continue
+            if sym.coordinates[0] > canvas_dbl_x:
+                dist = sym.coordinates[0] - canvas_dbl_x
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+
+        if best_idx >= 0 and best_dist < 300:
+            old_rhythm = symbols[best_idx].rhythm
+            new_rhythm = f"keySignature_{new_fifths}"
+            if old_rhythm != new_rhythm:
+                print(f"  [KeySig] Staff {si}: {old_rhythm} → {new_rhythm} "
+                      f"(detected {n_nat}♮ {n_flat}♭ {n_sharp}♯)")
+                symbols[best_idx].rhythm = new_rhythm
+                n_corrected += 1
+
+    return n_corrected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HOMR pipeline (all GPU)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True) -> Tuple[str, List[str]]:
+
+def _detect_system_breaks(staffs_sorted, brace_dots):
+    """Split sorted staves into system groups using large bracket detection.
+    Each system starts with a tall bracket/brace on the left that spans all
+    its staves.  We find these tall bounding-boxes and assign staves to them."""
+    if len(staffs_sorted) <= 1:
+        return [list(staffs_sorted)]
+
+    avg_staff_h = float(np.median([s.max_y - s.min_y for s in staffs_sorted]))
+    min_bracket_h = avg_staff_h * 4
+
+    candidates = []
+    for bd in brace_dots:
+        h = bd.size[1]
+        w = max(bd.size[0], 1)
+        if h > min_bracket_h and h / w > 5:
+            y_top = bd.center[1] - h / 2
+            y_bot = bd.center[1] + h / 2
+            candidates.append((y_top, y_bot))
+
+    if not candidates:
+        return [list(staffs_sorted)]
+
+    candidates.sort(key=lambda b: b[0])
+
+    merged = [list(candidates[0])]
+    for top, bot in candidates[1:]:
+        if top < merged[-1][1]:
+            merged[-1][0] = min(merged[-1][0], top)
+            merged[-1][1] = max(merged[-1][1], bot)
+        else:
+            merged.append([top, bot])
+
+    if len(merged) <= 1:
+        return [list(staffs_sorted)]
+
+    systems = [[] for _ in merged]
+    margin = avg_staff_h
+    for staff in staffs_sorted:
+        cy = (staff.min_y + staff.max_y) / 2
+        assigned = False
+        for bi, (top, bot) in enumerate(merged):
+            if top - margin <= cy <= bot + margin:
+                systems[bi].append(staff)
+                assigned = True
+                break
+        if not assigned:
+            best = min(range(len(merged)),
+                       key=lambda i: abs(cy - (merged[i][0] + merged[i][1]) / 2))
+            systems[best].append(staff)
+
+    systems = [s for s in systems if s]
+    return systems if systems else [list(staffs_sorted)]
+
+
+_VLM_EXTRA_SYSTEM_PROMPT = """This is a CROPPED region from an orchestral music score, showing the LEFT MARGIN of one system (行).
+Read each instrument name or abbreviation from top to bottom.
+Map each to one of these standard names: {master_names}
+There are exactly {n} staves in this region. Output exactly {n} lines, one standard name per staff, from top to bottom. No numbering, no extra text.
+German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass."""
+
+
+def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
+    """Detect instrument names for a non-first system via VLM on left-margin crop."""
+    n = len(sys_staves)
+    if not use_vlm or n == 0:
+        return [f"Part {i + 1}" for i in range(n)]
+
+    try:
+        import base64, io
+        from PIL import Image as PILImage
+        import openai
+
+        top = max(0, int(sys_staves[0].min_y - 80))
+        bottom = min(image.shape[0], int(sys_staves[-1].max_y + 80))
+        left_end = int(min(s.min_x for s in sys_staves))
+        crop = image[top:bottom, 0:left_end]
+        if crop.size == 0:
+            raise ValueError("empty crop")
+
+        pil_crop = PILImage.fromarray(
+            crop if crop.ndim == 3 else cv2.cvtColor(crop, cv2.COLOR_GRAY2RGB))
+
+        buf = io.BytesIO()
+        pil_crop.save(buf, format="PNG")
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        api_key, base_url = None, None
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("API_KEY="):
+                        api_key = line.split("=", 1)[1]
+                    elif line.startswith("BASE_URL="):
+                        base_url = line.split("=", 1)[1]
+
+        if not api_key or not base_url:
+            raise ValueError("no VLM credentials")
+
+        unique_master = sorted(set(master_names))
+        prompt = _VLM_EXTRA_SYSTEM_PROMPT.format(
+            master_names=", ".join(unique_master), n=n)
+
+        client = openai.OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1/")
+        response = client.chat.completions.create(
+            model="Qwen3-VL-235B-A22B-Instruct",
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]}],
+            max_tokens=300, temperature=0.0,
+        )
+        text = response.choices[0].message.content.strip()
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        print(f"[VLM-extra] System names ({len(lines)}): {lines}")
+
+        if len(lines) == n:
+            valid = sum(1 for nm in lines if nm in set(master_names))
+            if valid >= n * 0.5:
+                return lines
+        # VLM count mismatch — try expanding via grand staff pair detection
+        if len(lines) == n - 1 and len(lines) > 0:
+            gaps = []
+            for gi in range(1, n):
+                gaps.append(sys_staves[gi].min_y - sys_staves[gi - 1].max_y)
+            min_gap_idx = int(np.argmin(gaps))
+            expanded = lines[:min_gap_idx + 1] + [lines[min_gap_idx]] + lines[min_gap_idx + 1:]
+            valid = sum(1 for nm in expanded if nm in set(master_names))
+            if valid >= n * 0.5:
+                print(f"[VLM-extra] Expanded via grand staff at staves {min_gap_idx}/{min_gap_idx + 1}: {expanded}")
+                return expanded
+        if len(lines) > 0:
+            valid_lines = [nm for nm in lines if nm in set(master_names)]
+            if len(valid_lines) >= n * 0.5:
+                result = list(lines[:n]) if len(lines) >= n else lines + [lines[-1]] * (n - len(lines))
+                print(f"[VLM-extra] Best-effort mapping: {result}")
+                return result
+        print(f"[VLM-extra] Could not match {len(lines)} names to {n} staves")
+    except Exception as e:
+        print(f"[VLM-extra] Failed: {e}")
+
+    return [f"Part {i + 1}" for i in range(n)]
+
+
+def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
+                      tremolo_templates: str = None) -> List[Tuple[str, List[str]]]:
     """
     Run HOMR's complete pipeline with automatic system grouping override
-    for orchestral scores. Returns (MusicXML string, list of part names).
+    for orchestral scores. Returns list of (MusicXML string, part names) tuples.
+    Normally returns a single-element list; multi-element for pages with
+    systems of different staff counts (e.g. reduced orchestration).
     """
     from homr.main import (
         load_and_preprocess_predictions, predict_symbols,
@@ -595,18 +1657,97 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True)
     # ── Determine parts-per-system and group staves ──
     n_parts = len(part_names)
     staffs_sorted = sorted(staffs, key=lambda s: s.min_y)
+    system_groups = _detect_system_breaks(staffs_sorted, brace_dots)
+    sys_sizes = [len(g) for g in system_groups]
+    print(f"[HOMR] Detected {len(system_groups)} system(s): {sys_sizes} staves each")
 
-    if n_parts > 0 and len(staffs_sorted) >= n_parts:
-        n_systems = len(staffs_sorted) // n_parts
-        remainder = len(staffs_sorted) % n_parts
-        multi_staffs = []
-        for sys_idx in range(n_systems):
-            start = sys_idx * n_parts
-            system_staves = [staffs_sorted[start + p] for p in range(n_parts)]
-            multi_staffs.append(MultiStaff(system_staves, []))
-        if remainder > 0:
-            print(f"[HOMR] Warning: {remainder} extra staves ignored (not a full system)")
-        print(f"[HOMR] Grouped: {n_parts} parts × {n_systems} systems")
+    first_sys_count = sys_sizes[0]
+    all_same = all(sz == first_sys_count for sz in sys_sizes)
+    multi_system_mode = (n_parts > 0 and first_sys_count == n_parts
+                         and not all_same)
+
+    if multi_system_mode:
+        # ── MULTI-SYSTEM with different staff counts ──
+        print(f"[HOMR] Multi-system page: {sys_sizes}")
+
+        transformer_config = Config()
+        transformer_config.use_gpu_inference = use_gpu
+        xml_args = XmlGeneratorArguments()
+
+        try:
+            title = title_future.result(60)
+        except Exception:
+            title = Path(img_path).stem
+
+        tremolo_dets = []
+        coord_scale = 1.0
+        if tremolo_templates and os.path.isdir(tremolo_templates):
+            full_image = cv2.imread(img_path)
+            homr_h, homr_w = predictions.original.shape[:2]
+            coord_scale = full_image.shape[1] / homr_w
+            tremolo_dets = detect_tremolo(full_image, tremolo_templates, threshold=0.75)
+
+        full_image_ks = cv2.imread(img_path)
+
+        results = []
+        for sys_idx, sys_staves in enumerate(system_groups):
+            t_sys = time.time()
+            print(f"\n[HOMR] Processing system {sys_idx + 1}/{len(system_groups)} "
+                  f"({len(sys_staves)} staves)")
+
+            sys_multi = [MultiStaff(sys_staves, [])]
+            sys_result = parse_staffs(
+                debug, sys_multi, predictions.preprocessed,
+                selected_staff=-1, config=transformer_config,
+            )
+            n_sym = sum(len(s) for s in sys_result)
+            print(f"[HOMR] System {sys_idx + 1} TrOMR: {len(sys_result)} parts, "
+                  f"{n_sym} symbols ({time.time() - t_sys:.1f}s)")
+
+            if tremolo_dets:
+                matched = match_tremolo_to_noteheads(
+                    tremolo_dets, all_noteheads, sys_staves, coord_scale)
+                if matched:
+                    n_inj = inject_tremolo(sys_result, matched, sys_staves)
+                    print(f"[Tremolo] System {sys_idx + 1}: {n_inj} injected")
+
+            n_ks = correct_key_signatures(
+                sys_result, sys_staves, predictions.original,
+                bar_line_boxes, full_res_image=full_image_ks)
+            if n_ks:
+                print(f"[KeySig] System {sys_idx + 1}: {n_ks} corrected")
+
+            if sys_idx == 0:
+                sys_names = part_names
+            else:
+                sys_names = _ocr_extra_system_names(
+                    sys_staves, predictions.original, part_names,
+                    use_vlm=use_vlm)
+
+            xml_root = generate_xml(xml_args, sys_result, title)
+            xml_string = xml_root.to_string()
+
+            sys_dynamics = detect_dynamics(sys_staves, img_path, bar_line_boxes, predictions.original.shape)
+            if sys_dynamics:
+                xml_string = _inject_dynamics(xml_string, sys_dynamics)
+                print(f"[Dynamics] System {sys_idx + 1}: {len(sys_dynamics)} marking(s)")
+
+            results.append((xml_string, sys_names))
+
+        return results
+
+    # ── Normal path: uniform system sizes ──
+    if n_parts > 0 and len(staffs_sorted) >= n_parts and all_same:
+        multi_staffs = [MultiStaff(g, []) for g in system_groups]
+        print(f"[HOMR] Grouped: {n_parts} parts × {len(system_groups)} systems")
+    elif n_parts > 0 and all_same and first_sys_count != n_parts:
+        multi_staffs = [MultiStaff(g, []) for g in system_groups]
+        n_parts = first_sys_count
+        if len(part_names) > n_parts:
+            part_names = part_names[:n_parts]
+        else:
+            part_names = part_names + [f"Part {i + 1}" for i in range(len(part_names), n_parts)]
+        print(f"[HOMR] Adjusted: {n_parts} parts × {len(system_groups)} systems")
     else:
         brace_dot_img = prepare_brace_dot_image(predictions.symbols, predictions.staff)
         brace_dot = create_rotated_bounding_boxes(
@@ -616,7 +1757,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True)
         print(f"[HOMR] Auto-grouped: {[len(ms.staffs) for ms in multi_staffs]}")
         n_parts = len(multi_staffs[0].staffs) if multi_staffs else 0
 
-    # ── Per-staff recognition (TrOMR) ──
     t3 = time.time()
     transformer_config = Config()
     transformer_config.use_gpu_inference = use_gpu
@@ -634,18 +1774,96 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True)
     t4 = time.time()
     n_result = len(result_staffs)
     n_symbols = sum(len(s) for s in result_staffs)
-    print(f"[HOMR] TrOMR done: {n_result} parts, {n_symbols} symbols ({t4-t3:.1f}s)")
+    print(f"[HOMR] TrOMR done: {n_result} parts, {n_symbols} symbols ({t4 - t3:.1f}s)")
+
+    if tremolo_templates and os.path.isdir(tremolo_templates):
+        t_tr = time.time()
+        full_image = cv2.imread(img_path)
+        homr_h, homr_w = predictions.original.shape[:2]
+        full_h, full_w = full_image.shape[:2]
+        coord_scale = full_w / homr_w
+
+        tremolo_dets = detect_tremolo(full_image, tremolo_templates, threshold=0.75)
+        if tremolo_dets:
+            matched = match_tremolo_to_noteheads(
+                tremolo_dets, all_noteheads, staffs_sorted, coord_scale,
+            )
+            n_inj = inject_tremolo(result_staffs, matched, staffs_sorted)
+            print(f"[Tremolo] {len(tremolo_dets)} detections, {len(matched)} matched to noteheads, "
+                  f"{n_inj} injected ({time.time() - t_tr:.1f}s)")
+        else:
+            print(f"[Tremolo] 0 detections ({time.time() - t_tr:.1f}s)")
+
+    t_ks = time.time()
+    full_image_ks = cv2.imread(img_path)
+    n_ks = correct_key_signatures(result_staffs, staffs_sorted, predictions.original,
+                                  bar_line_boxes, full_res_image=full_image_ks)
+    if n_ks:
+        print(f"[KeySig] Corrected {n_ks} key signature(s) ({time.time() - t_ks:.1f}s)")
 
     xml_args = XmlGeneratorArguments()
     xml_root = generate_xml(xml_args, result_staffs, title)
     xml_string = xml_root.to_string()
 
-    return xml_string, part_names
+    t_dyn = time.time()
+    dynamics = detect_dynamics(staffs_sorted, img_path, bar_line_boxes, predictions.original.shape)
+    if dynamics:
+        xml_string = _inject_dynamics(xml_string, dynamics)
+        print(f"[Dynamics] Injected {len(dynamics)} marking(s) ({time.time() - t_dyn:.1f}s)")
+
+    return [(xml_string, part_names)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Post-process MusicXML
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _inject_dynamics(xml_string: str, dynamics_list) -> str:
+    """Insert <direction> elements for detected dynamics into MusicXML."""
+    if not dynamics_list:
+        return xml_string
+    try:
+        root = ET.fromstring(xml_string)
+    except ET.ParseError:
+        return xml_string
+
+    parts = root.findall("part")
+
+    seen = set()
+    bound_notes = set()
+    for staff_idx, measure_num, note_idx, dyn_type in dynamics_list:
+        key = (staff_idx, measure_num, dyn_type)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if staff_idx >= len(parts):
+            continue
+        part = parts[staff_idx]
+        measures = part.findall("measure")
+        if measure_num < 1 or measure_num > len(measures):
+            continue
+        measure = measures[measure_num - 1]
+
+        sounding = [ch for ch in measure if ch.tag == "note" and ch.find("rest") is None]
+        if not sounding:
+            continue
+        target = sounding[min(note_idx, len(sounding) - 1)]
+        note_key = (staff_idx, measure_num, id(target))
+        if note_key in bound_notes:
+            continue
+        bound_notes.add(note_key)
+
+        direction = ET.Element("direction", attrib={"placement": "below"})
+        dir_type = ET.SubElement(direction, "direction-type")
+        dynamics_el = ET.SubElement(dir_type, "dynamics", attrib={"default-y": "-80"})
+        ET.SubElement(dynamics_el, dyn_type)
+
+        children = list(measure)
+        measure.insert(children.index(target), direction)
+
+    return ET.tostring(root, encoding="unicode", xml_declaration=False)
+
 
 def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
     """Replace generic part names and instrument encoding in the MusicXML."""
@@ -659,14 +1877,16 @@ def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
         return xml_string
 
     score_parts = part_list.findall("score-part")
-    for sp, name in zip(score_parts, part_names):
+    parts = root.findall("part")
+    for idx, (sp, name) in enumerate(zip(score_parts, part_names)):
         pn = sp.find("part-name")
         if pn is not None:
             pn.text = name
         else:
             ET.SubElement(sp, "part-name").text = name
 
-        sound, midi_prog = INSTRUMENT_MIDI.get(name, ("keyboard.piano", 1))
+        base = _instrument_base(name)
+        sound, midi_prog = INSTRUMENT_MIDI.get(base, ("keyboard.piano", 1))
 
         si = sp.find("score-instrument")
         if si is not None:
@@ -682,6 +1902,15 @@ def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
             mp = mi.find("midi-program")
             if mp is not None:
                 mp.text = str(midi_prog)
+
+        if idx < len(parts):
+            first_m = parts[idx].find("measure")
+            if first_m is not None:
+                attrs = first_m.find("attributes")
+                if attrs is None:
+                    attrs = ET.SubElement(first_m, "attributes")
+                if attrs.find("transpose") is None:
+                    _inject_transpose(attrs, name)
 
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
@@ -808,23 +2037,6 @@ def _cross_part_post_process(xml_string: str) -> str:
                     if b is not None: b.text = maj_beats
                     if bt is not None: bt.text = maj_bt
 
-        # Key signature consensus
-        key_sigs = []
-        for m in measures:
-            k = m.find(".//key")
-            if k is not None:
-                key_sigs.append(k.findtext("fifths", "0"))
-        if key_sigs:
-            maj_fifths, cnt = Counter(key_sigs).most_common(1)[0]
-            if cnt < len(key_sigs):
-                fixes.append(f"m{mn}: key sig → fifths={maj_fifths}")
-            for m in measures:
-                k = m.find(".//key")
-                if k is not None:
-                    f_el = k.find("fifths")
-                    if f_el is not None:
-                        f_el.text = maj_fifths
-
     # ── Layer 2: Structural alignment (unify measure count) ──
 
     measure_counts = [len(p.findall("measure")) for p in parts]
@@ -855,33 +2067,125 @@ def _cross_part_post_process(xml_string: str) -> str:
 
     # ── Layer 3: Content repair (fix measure durations) ──
 
-    def _get_expected_quarter_length(measure):
-        """Get expected quarter-note length from time signature in context."""
-        t = measure.find(".//time")
-        if t is not None:
-            try:
-                beats = int(t.findtext("beats", "4"))
-                bt = int(t.findtext("beat-type", "4"))
-                return beats * 4.0 / bt
-            except ValueError:
-                pass
-        return 4.0
+    # Pre-pass: chord dot/type consistency — simultaneous notes must share
+    # the same duration, so if a majority have a dot the rest should too.
+    for part in parts:
+        pid = part.get("id", "?")
+        for measure in part.findall("measure"):
+            mn = measure.get("number", "?")
+            children = list(measure)
+            i = 0
+            while i < len(children):
+                if children[i].tag != "note":
+                    i += 1
+                    continue
+                group = [children[i]]
+                j = i + 1
+                while j < len(children) and children[j].tag == "note" and children[j].find("chord") is not None:
+                    group.append(children[j])
+                    j += 1
+                i = j
+                if len(group) < 2:
+                    continue
+                dots = [n.find("dot") is not None for n in group]
+                if len(set(dots)) <= 1:
+                    continue
+                majority_dot = sum(dots) > len(dots) / 2
+                types = [n.findtext("type", "") for n in group]
+                if len(set(types)) > 1:
+                    continue
+                lead_dur = group[0].findtext("duration", "")
+                for k, note in enumerate(group):
+                    has_dot = dots[k]
+                    if has_dot == majority_dot:
+                        continue
+                    if majority_dot and not has_dot:
+                        ET.SubElement(note, "dot")
+                        if lead_dur:
+                            dur_el = note.find("duration")
+                            if dur_el is not None:
+                                dur_el.text = lead_dur
+                        fixes.append(f"{pid} m{mn}: chord dot added to {types[k]}")
+                    elif not majority_dot and has_dot:
+                        note.remove(note.find("dot"))
+                        if lead_dur:
+                            dur_el = note.find("duration")
+                            if dur_el is not None:
+                                dur_el.text = lead_dur
+                        fixes.append(f"{pid} m{mn}: chord dot removed from {types[k]}")
 
-    def _get_divisions(measure):
-        d = measure.findtext(".//divisions")
-        return int(d) if d else 1
+    _TYPE_TO_QL = {
+        "breve": 8.0, "whole": 4.0, "half": 2.0, "quarter": 1.0,
+        "eighth": 0.5, "16th": 0.25, "32nd": 0.125, "64th": 0.0625,
+    }
+    _QL_TO_TYPE = {v: k for k, v in _TYPE_TO_QL.items()}
+    _SORTED_QLS = sorted(_TYPE_TO_QL.values(), reverse=True)
+    _ADJACENT_TYPES = {
+        "breve": ["whole"], "whole": ["breve", "half"],
+        "half": ["whole", "quarter"], "quarter": ["half", "eighth"],
+        "eighth": ["quarter", "16th"], "16th": ["eighth", "32nd"],
+        "32nd": ["16th", "64th"], "64th": ["32nd"],
+    }
+
+    def _note_expected_dur(note_el, divs):
+        ntype = note_el.findtext("type", "")
+        ql = _TYPE_TO_QL.get(ntype, 0)
+        if ql == 0:
+            return 0
+        if note_el.find("dot") is not None:
+            ql *= 1.5
+        return round(ql * divs)
+
+    def _measure_pos_tracking(measure):
+        pos, max_pos = 0, 0
+        for child in measure:
+            if child.tag == "note":
+                if child.find("chord") is not None:
+                    continue
+                try:
+                    pos += int(child.findtext("duration", "0"))
+                except (ValueError, TypeError):
+                    pass
+                max_pos = max(max_pos, pos)
+            elif child.tag == "backup":
+                try:
+                    pos -= int(child.findtext("duration", "0"))
+                except (ValueError, TypeError):
+                    pass
+            elif child.tag == "forward":
+                try:
+                    pos += int(child.findtext("duration", "0"))
+                except (ValueError, TypeError):
+                    pass
+        return max_pos
+
+    def _scale_all_durations(measure, ratio):
+        for child in measure:
+            if child.tag in ("note", "backup", "forward"):
+                dur_el = child.find("duration")
+                if dur_el is not None:
+                    try:
+                        old = int(dur_el.text)
+                        dur_el.text = str(max(1, round(old * ratio)))
+                    except (ValueError, TypeError):
+                        pass
 
     for pi, part in enumerate(parts):
         pid = part.get("id", f"P{pi+1}")
-        current_expected = 4.0
         current_divs = 1
+        current_beats = 4
+        current_bt = 4
 
         for measure in part.findall("measure"):
             mn = measure.get("number", "?")
 
             t = measure.find(".//time")
             if t is not None:
-                current_expected = _get_expected_quarter_length(measure)
+                try:
+                    current_beats = int(t.findtext("beats", "4"))
+                    current_bt = int(t.findtext("beat-type", "4"))
+                except ValueError:
+                    pass
             d = measure.find(".//divisions")
             if d is not None:
                 try:
@@ -889,65 +2193,352 @@ def _cross_part_post_process(xml_string: str) -> str:
                 except (ValueError, TypeError):
                     pass
 
-            notes = measure.findall("note")
+            expected_dur = round(current_beats * current_divs * 4.0 / current_bt)
+
+            # Strip extra dots (TrOMR sometimes outputs double dots)
+            for note in (c for c in measure if c.tag == "note"):
+                dots = note.findall("dot")
+                if len(dots) > 1:
+                    for d in dots[1:]:
+                        note.remove(d)
+
+            actual_dur = _measure_pos_tracking(measure)
+
+            if actual_dur == 0 or actual_dur == expected_dur:
+                continue
+
+            notes = [c for c in measure if c.tag == "note"]
             if not notes:
                 continue
 
-            # compute actual measure duration via position tracking
-            pos = 0
-            max_pos = 0
-            for child in measure:
-                if child.tag == "note":
-                    if child.find("chord") is not None:
-                        continue
-                    dur_el = child.find("duration")
-                    if dur_el is not None:
-                        try:
-                            pos += int(dur_el.text)
-                        except (ValueError, TypeError):
-                            pass
-                    max_pos = max(max_pos, pos)
-                elif child.tag == "backup":
-                    dur_el = child.find("duration")
-                    if dur_el is not None:
-                        try:
-                            pos -= int(dur_el.text)
-                        except (ValueError, TypeError):
-                            pass
-                elif child.tag == "forward":
-                    dur_el = child.find("duration")
-                    if dur_el is not None:
-                        try:
-                            pos += int(dur_el.text)
-                        except (ValueError, TypeError):
-                            pass
+            # ── Fix A: whole-rest with wrong duration ──
+            non_chord = [n for n in notes if n.find("chord") is None]
+            if (len(non_chord) == 1 and non_chord[0].find("rest") is not None
+                    and non_chord[0].findtext("type", "") in ("whole", "breve", "")):
+                dur_el = non_chord[0].find("duration")
+                if dur_el is not None:
+                    dur_el.text = str(expected_dur)
+                    fixes.append(f"{pid} m{mn}: whole rest dur {actual_dur}→{expected_dur}")
+                    continue
 
-            actual_ql = max_pos / current_divs if current_divs else max_pos
-            expected_ql = current_expected
+            # ── Fix B: uniform scale if all notes are off by same ratio ──
+            # This happens when divisions changed but durations weren't updated.
+            # Check: does every note's dur/expected_dur give the same ratio?
+            ratios = []
+            for note in notes:
+                exp_d = _note_expected_dur(note, current_divs)
+                if exp_d <= 0:
+                    continue
+                dur_el = note.find("duration")
+                if dur_el is None:
+                    continue
+                try:
+                    cur_d = int(dur_el.text)
+                except (ValueError, TypeError):
+                    continue
+                ratios.append(cur_d / exp_d)
 
-            if abs(actual_ql - expected_ql) < 0.01 or max_pos == 0:
-                continue
+            if ratios and len(set(round(r, 3) for r in ratios)) == 1 and abs(ratios[0] - 1.0) > 0.01:
+                scale = 1.0 / ratios[0]
+                _scale_all_durations(measure, scale)
+                new_dur = _measure_pos_tracking(measure)
+                if new_dur == expected_dur:
+                    fixes.append(f"{pid} m{mn}: uniform scale ×{scale:.3f} ({actual_dur}→{expected_dur})")
+                    continue
+                else:
+                    _scale_all_durations(measure, 1.0 / scale)
 
-            ratio = expected_ql / actual_ql
-            if 0.3 < ratio < 3.0 and ratio != 1.0:
-                # scale all duration elements: notes, backups, forwards
-                dur_elements = []
+            # ── Fix B': align notes to types + recalculate backups ──
+            # For each note, set duration = expected from type.
+            # Then recalculate each backup as the sum of non-chord durations
+            # since the previous backup (or measure start).
+            note_changes = []
+            for note in notes:
+                exp_d = _note_expected_dur(note, current_divs)
+                if exp_d <= 0:
+                    continue
+                dur_el = note.find("duration")
+                if dur_el is None:
+                    continue
+                try:
+                    cur_d = int(dur_el.text)
+                except (ValueError, TypeError):
+                    continue
+                if cur_d != exp_d:
+                    note_changes.append((dur_el, exp_d, cur_d))
+
+            if note_changes:
+                for dur_el, exp_d, _ in note_changes:
+                    dur_el.text = str(exp_d)
+                seg_dur = 0
                 for child in measure:
                     if child.tag == "note":
-                        dur_el = child.find("duration")
-                        if dur_el is not None:
-                            dur_elements.append(dur_el)
-                    elif child.tag in ("backup", "forward"):
-                        dur_el = child.find("duration")
-                        if dur_el is not None:
-                            dur_elements.append(dur_el)
-                for dur_el in dur_elements:
+                        if child.find("chord") is None:
+                            try:
+                                seg_dur += int(child.findtext("duration", "0"))
+                            except (ValueError, TypeError):
+                                pass
+                    elif child.tag == "backup":
+                        b_el = child.find("duration")
+                        if b_el is not None:
+                            b_el.text = str(seg_dur)
+                        seg_dur = 0
+                    elif child.tag == "forward":
+                        try:
+                            seg_dur += int(child.findtext("duration", "0"))
+                        except (ValueError, TypeError):
+                            pass
+                new_dur = _measure_pos_tracking(measure)
+                if new_dur == expected_dur:
+                    fixes.append(f"{pid} m{mn}: aligned {len(note_changes)} notes + backups ({actual_dur}→{expected_dur})")
+                    continue
+                else:
+                    for dur_el, _, old_d in note_changes:
+                        dur_el.text = str(old_d)
+                    seg_dur2 = 0
+                    for child in measure:
+                        if child.tag == "note":
+                            if child.find("chord") is None:
+                                try:
+                                    seg_dur2 += int(child.findtext("duration", "0"))
+                                except (ValueError, TypeError):
+                                    pass
+                        elif child.tag == "backup":
+                            b_el = child.find("duration")
+                            if b_el is not None:
+                                b_el.text = str(seg_dur2)
+                            seg_dur2 = 0
+                        elif child.tag == "forward":
+                            try:
+                                seg_dur2 += int(child.findtext("duration", "0"))
+                            except (ValueError, TypeError):
+                                pass
+
+            # ── Fix C: single-note type change (adjacent types only) ──
+            actual_dur = _measure_pos_tracking(measure)
+            diff = actual_dur - expected_dur
+            if diff == 0:
+                continue
+
+            best_fix = None
+            for note in notes:
+                if note.find("chord") is not None:
+                    continue
+                dur_el = note.find("duration")
+                if dur_el is None:
+                    continue
+                try:
+                    cur_d = int(dur_el.text)
+                except (ValueError, TypeError):
+                    continue
+                cur_type = note.findtext("type", "")
+                cur_dot = note.find("dot") is not None
+                target_d = cur_d - diff
+                if target_d <= 0:
+                    continue
+                target_ql = target_d / current_divs
+
+                candidates = _ADJACENT_TYPES.get(cur_type, [])
+                for cand_type in candidates:
+                    cand_ql = _TYPE_TO_QL[cand_type]
+                    for dotted in (False, True):
+                        ql = cand_ql * 1.5 if dotted else cand_ql
+                        if abs(target_ql - ql) < 0.001:
+                            cost = abs(cur_d - target_d)
+                            if best_fix is None or cost < best_fix[0]:
+                                best_fix = (cost, note, dur_el, target_d, cand_type, dotted)
+                if not cur_dot:
+                    cand_ql = _TYPE_TO_QL.get(cur_type, 0) * 1.5
+                    if abs(target_ql - cand_ql) < 0.001:
+                        cost = abs(cur_d - target_d)
+                        if best_fix is None or cost < best_fix[0]:
+                            best_fix = (cost, note, dur_el, target_d, cur_type, True)
+                if cur_dot:
+                    cand_ql = _TYPE_TO_QL.get(cur_type, 0)
+                    if abs(target_ql - cand_ql) < 0.001:
+                        cost = abs(cur_d - target_d)
+                        if best_fix is None or cost < best_fix[0]:
+                            best_fix = (cost, note, dur_el, target_d, cur_type, False)
+
+            if best_fix is not None:
+                _, note, dur_el, new_d, new_type, new_dot = best_fix
+                old_type = note.findtext("type", "?")
+                old_dot = "." if note.find("dot") is not None else ""
+                old_d = dur_el.text
+                dur_el.text = str(new_d)
+                type_el = note.find("type")
+                if type_el is not None:
+                    type_el.text = new_type
+                if new_dot and note.find("dot") is None:
+                    ET.SubElement(note, "dot")
+                elif not new_dot and note.find("dot") is not None:
+                    note.remove(note.find("dot"))
+                fixes.append(f"{pid} m{mn}: {old_type}{old_dot}({old_d}) → {new_type}{'.' if new_dot else ''}({new_d})")
+                continue
+
+            # ── Fix C': shrink/remove a rest to fix overshoot ──
+            # If the measure is too long, find a rest whose duration can be
+            # reduced (to a standard value) or removed to make the total exact.
+            actual_dur = _measure_pos_tracking(measure)
+            diff = actual_dur - expected_dur
+            if diff > 0:
+                best_rest_fix = None
+                for note in notes:
+                    if note.find("chord") is not None:
+                        continue
+                    if note.find("rest") is None:
+                        continue
+                    dur_el = note.find("duration")
+                    if dur_el is None:
+                        continue
                     try:
-                        old = int(dur_el.text)
-                        dur_el.text = str(max(1, round(old * ratio)))
+                        cur_d = int(dur_el.text)
                     except (ValueError, TypeError):
-                        pass
-                fixes.append(f"{pid} m{mn}: scaled durations ×{ratio:.2f} ({actual_ql}→{expected_ql})")
+                        continue
+                    new_d = cur_d - diff
+                    if new_d < 0:
+                        continue
+                    if new_d == 0:
+                        # removing rest entirely — prefer shrinking over removal
+                        cost = cur_d * 10
+                        if best_rest_fix is None or cost < best_rest_fix[0]:
+                            best_rest_fix = (cost, note, dur_el, new_d, "remove")
+                        continue
+                    new_ql = new_d / current_divs
+                    # accept if it maps to any standard note value (with or without dot)
+                    matched = False
+                    for std_ql in _SORTED_QLS:
+                        if abs(new_ql - std_ql) < 0.001 or abs(new_ql - std_ql * 1.5) < 0.001:
+                            matched = True
+                            break
+                    if matched:
+                        cost = diff
+                        if best_rest_fix is None or cost < best_rest_fix[0]:
+                            best_rest_fix = (cost, note, dur_el, new_d, "shrink")
+
+                if best_rest_fix is not None:
+                    _, note, dur_el, new_d, action = best_rest_fix
+                    old_type = note.findtext("type", "?")
+                    old_d = dur_el.text
+                    if action == "remove" and new_d == 0:
+                        measure.remove(note)
+                        fixes.append(f"{pid} m{mn}: removed rest {old_type}({old_d})")
+                    else:
+                        dur_el.text = str(new_d)
+                        new_ql = new_d / current_divs
+                        for std_ql in _SORTED_QLS:
+                            if abs(new_ql - std_ql) < 0.001:
+                                new_type = _QL_TO_TYPE[std_ql]
+                                new_dot = False
+                                break
+                            if abs(new_ql - std_ql * 1.5) < 0.001:
+                                new_type = _QL_TO_TYPE[std_ql]
+                                new_dot = True
+                                break
+                        else:
+                            new_type = old_type
+                            new_dot = note.find("dot") is not None
+                        type_el = note.find("type")
+                        if type_el is not None:
+                            type_el.text = new_type
+                        if new_dot and note.find("dot") is None:
+                            ET.SubElement(note, "dot")
+                        elif not new_dot and note.find("dot") is not None:
+                            note.remove(note.find("dot"))
+                        ndot = "." if new_dot else ""
+                        fixes.append(f"{pid} m{mn}: rest {old_type}({old_d}) → {new_type}{ndot}({new_d})")
+                    continue
+
+            # ── Fix T: triplet detection ──
+            # If 3 consecutive equal-duration notes exist whose individual
+            # duration equals the overshoot, convert them to a triplet.
+            actual_dur = _measure_pos_tracking(measure)
+            diff = actual_dur - expected_dur
+            if diff > 0:
+                voice_notes = {}
+                for note in notes:
+                    if note.find("chord") is not None:
+                        continue
+                    v = note.findtext("voice", "1")
+                    voice_notes.setdefault(v, []).append(note)
+
+                triplet_fixed = False
+                for v, vnotes in voice_notes.items():
+                    v_total = sum(int(n.findtext("duration", "0")) for n in vnotes)
+                    v_diff = v_total - expected_dur
+                    if v_diff <= 0:
+                        continue
+                    for i in range(len(vnotes) - 2):
+                        d0 = int(vnotes[i].findtext("duration", "0"))
+                        d1 = int(vnotes[i + 1].findtext("duration", "0"))
+                        d2 = int(vnotes[i + 2].findtext("duration", "0"))
+                        if d0 == d1 == d2 == v_diff and d0 > 0:
+                            new_d = round(d0 * 2 / 3)
+                            for j in range(3):
+                                n = vnotes[i + j]
+                                n.find("duration").text = str(new_d)
+                                if n.find("time-modification") is None:
+                                    tm = ET.SubElement(n, "time-modification")
+                                    ET.SubElement(tm, "actual-notes").text = "3"
+                                    ET.SubElement(tm, "normal-notes").text = "2"
+                                notations = n.find("notations")
+                                if notations is None:
+                                    notations = ET.SubElement(n, "notations")
+                                if j == 0:
+                                    ET.SubElement(notations, "tuplet",
+                                                  type="start", bracket="yes", number="1")
+                                elif j == 2:
+                                    ET.SubElement(notations, "tuplet",
+                                                  type="stop", number="1")
+                            triplet_fixed = True
+                            fixes.append(f"{pid} m{mn}: triplet v{v} ({d0}→{new_d})×3")
+                            break
+                    if triplet_fixed:
+                        break
+                if triplet_fixed:
+                    continue
+
+            # ── Fix D: fallback — uniform scale + rounding correction ──
+            actual_dur = _measure_pos_tracking(measure)
+            if actual_dur > 0 and actual_dur != expected_dur:
+                ratio = expected_dur / actual_dur
+                if 0.3 < ratio < 3.0:
+                    _scale_all_durations(measure, ratio)
+                    new_dur = _measure_pos_tracking(measure)
+                    if new_dur != expected_dur:
+                        residual = new_dur - expected_dur
+                        longest = None
+                        for child in measure:
+                            if child.tag == "note" and child.find("chord") is None:
+                                d_el = child.find("duration")
+                                if d_el is not None:
+                                    try:
+                                        v = int(d_el.text)
+                                    except (ValueError, TypeError):
+                                        continue
+                                    if v - residual > 0 and (longest is None or v > longest[1]):
+                                        longest = (d_el, v)
+                        if longest:
+                            longest[0].text = str(longest[1] - residual)
+                    fixes.append(f"{pid} m{mn}: scaled ×{ratio:.2f} ({actual_dur}→{expected_dur})")
+
+    # ── Fix V: per-voice duration correction for multi-voice measures ──
+    vfix_n = _fix_voice_durations(root)
+    if vfix_n:
+        fixes.append(f"V-fix: corrected {vfix_n} multi-voice measures")
+
+    # ── Fix Triplet: mark unmarked triplets ──
+    trip_n = _mark_unmarked_triplets(root)
+    if trip_n:
+        fixes.append(f"Triplet: marked {trip_n} notes")
+
+    # ── Fix Overflow: remove excess rests when notated types exceed bar ──
+    overflow_n = _fix_notated_overflow(root)
+    if overflow_n:
+        fixes.append(f"Overflow: removed {overflow_n} excess rests")
+
+    # ── Fix E: type-duration alignment (final pass) ──
+    fixes.extend(_fix_type_duration_alignment(root, label="E-"))
 
     if fixes:
         print(f"[PostProcess] {len(fixes)} fixes:")
@@ -959,9 +2550,707 @@ def _cross_part_post_process(xml_string: str) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Quality check
-# ══════════════════════════════════════════════════════════════════════════════
+def _fix_voice_durations(root):
+    """Fix per-voice duration mismatches in multi-voice measures.
+
+    Scales notes of each wrong voice to fit expected duration,
+    then restructures all multi-voice measures into contiguous voice
+    blocks to ensure correct position tracking.
+    Returns number of measures fixed.
+    """
+    parts = root.findall("part")
+    count = 0
+
+    for part in parts:
+        cur_divs = 1
+        cur_beats = 4
+        cur_bt = 4
+
+        for measure in part.findall("measure"):
+            t = measure.find(".//time")
+            if t is not None:
+                try:
+                    cur_beats = int(t.findtext("beats", "4"))
+                    cur_bt = int(t.findtext("beat-type", "4"))
+                except ValueError:
+                    pass
+            d = measure.find(".//divisions")
+            if d is not None:
+                try:
+                    cur_divs = int(d.text)
+                except (ValueError, TypeError):
+                    pass
+
+            has_backup = any(ch.tag == "backup" for ch in measure)
+
+            expected_dur = round(cur_beats * cur_divs * 4.0 / cur_bt)
+
+            voice_durs = {}
+            for ch in measure:
+                if ch.tag == "note" and ch.find("chord") is None:
+                    v = ch.findtext("voice", "1")
+                    voice_durs.setdefault(v, 0)
+                    voice_durs[v] += int(ch.findtext("duration", "0"))
+
+            wrong = {v: tot for v, tot in voice_durs.items()
+                     if tot != expected_dur and tot > 0}
+
+            if wrong:
+                # Try triplet fix first for each wrong voice
+                for v, total in list(wrong.items()):
+                    v_diff = total - expected_dur
+                    if v_diff <= 0:
+                        continue
+                    vnotes = [ch for ch in measure
+                              if ch.tag == "note" and ch.find("chord") is None
+                              and ch.findtext("voice", "1") == v]
+                    for i in range(len(vnotes) - 2):
+                        d0 = int(vnotes[i].findtext("duration", "0"))
+                        d1 = int(vnotes[i + 1].findtext("duration", "0"))
+                        d2 = int(vnotes[i + 2].findtext("duration", "0"))
+                        if d0 == d1 == d2 == v_diff and d0 > 0:
+                            new_d = round(d0 * 2 / 3)
+                            for j in range(3):
+                                n = vnotes[i + j]
+                                n.find("duration").text = str(new_d)
+                                if n.find("time-modification") is None:
+                                    tm = ET.SubElement(n, "time-modification")
+                                    ET.SubElement(tm, "actual-notes").text = "3"
+                                    ET.SubElement(tm, "normal-notes").text = "2"
+                                notations = n.find("notations")
+                                if notations is None:
+                                    notations = ET.SubElement(n, "notations")
+                                if j == 0:
+                                    ET.SubElement(notations, "tuplet",
+                                                  type="start", bracket="yes", number="1")
+                                elif j == 2:
+                                    ET.SubElement(notations, "tuplet",
+                                                  type="stop", number="1")
+                            del wrong[v]
+                            break
+
+                # Scale remaining wrong voices
+                for v, total in wrong.items():
+                    deficit = expected_dur - total
+                    if deficit == 0:
+                        continue
+                    ratio = expected_dur / total
+                    if not (0.3 < ratio < 3.0):
+                        continue
+
+                    vnotes = [ch for ch in measure
+                              if ch.tag == "note" and ch.find("chord") is None
+                              and ch.findtext("voice", "1") == v]
+
+                    # Try smart fix: upgrade one note to fill deficit
+                    fixed = False
+                    if deficit > 0:
+                        std_durs = [192, 144, 96, 72, 48, 36, 24, 18, 12, 9, 6]
+                        std_map = {192: ("whole", False), 144: ("half", True),
+                                   96: ("half", False), 72: ("quarter", True),
+                                   48: ("quarter", False), 36: ("eighth", True),
+                                   24: ("eighth", False), 18: ("16th", True),
+                                   12: ("16th", False), 9: ("32nd", True),
+                                   6: ("32nd", False)}
+                        for note in vnotes:
+                            dur_el = note.find("duration")
+                            if dur_el is None:
+                                continue
+                            cur_d = int(dur_el.text or "0")
+                            target_d = cur_d + deficit
+                            if target_d in std_map:
+                                new_type, new_dot = std_map[target_d]
+                                dur_el.text = str(target_d)
+                                type_el = note.find("type")
+                                if type_el is not None:
+                                    type_el.text = new_type
+                                dot_el = note.find("dot")
+                                if new_dot and dot_el is None:
+                                    ET.SubElement(note, "dot")
+                                elif not new_dot and dot_el is not None:
+                                    note.remove(dot_el)
+                                # Sync chord notes
+                                for ch2 in measure:
+                                    if ch2.tag == "note" and ch2.find("chord") is not None:
+                                        if ch2.findtext("voice", "1") == v:
+                                            cd = ch2.find("duration")
+                                            if cd is not None and cd.text == str(cur_d):
+                                                cd.text = str(target_d)
+                                fixed = True
+                                break
+
+                    if not fixed:
+                        # Fallback: proportional scaling
+                        for ch in measure:
+                            if ch.tag == "note" and ch.findtext("voice", "1") == v:
+                                dur_el = ch.find("duration")
+                                if dur_el is not None:
+                                    dur_el.text = str(max(1, round(int(dur_el.text) * ratio)))
+
+                        new_total = sum(
+                            int(ch.findtext("duration", "0"))
+                            for ch in measure
+                            if ch.tag == "note" and ch.find("chord") is None
+                            and ch.findtext("voice", "1") == v
+                        )
+                        residual = new_total - expected_dur
+                        if residual != 0:
+                            longest_el, longest_val = None, 0
+                            for ch in measure:
+                                if (ch.tag == "note" and ch.find("chord") is None
+                                        and ch.findtext("voice", "1") == v):
+                                    dv = int(ch.findtext("duration", "0"))
+                                    if dv - residual > 0 and dv > longest_val:
+                                        longest_el = ch.find("duration")
+                                        longest_val = dv
+                            if longest_el is not None:
+                                longest_el.text = str(longest_val - residual)
+
+            if not has_backup:
+                if wrong:
+                    count += 1
+                continue
+
+            # Restructure: collect elements per voice, rebuild contiguously
+            preamble = []  # attributes, etc. before any note
+            voice_elems = {}  # voice_num -> [elements]
+            pending_dirs = []  # directions waiting to be assigned
+            cur_voice = None
+            seen_note = False
+
+            for ch in measure:
+                if ch.tag in ("attributes",):
+                    if not seen_note:
+                        preamble.append(ch)
+                    # attributes mid-measure: attach to current voice
+                    elif cur_voice is not None:
+                        voice_elems.setdefault(cur_voice, []).append(ch)
+                elif ch.tag == "note":
+                    seen_note = True
+                    v = ch.findtext("voice", "1")
+                    cur_voice = v
+                    elems = voice_elems.setdefault(v, [])
+                    elems.extend(pending_dirs)
+                    pending_dirs.clear()
+                    elems.append(ch)
+                elif ch.tag == "direction":
+                    pending_dirs.append(ch)
+                elif ch.tag in ("backup", "forward"):
+                    pass  # drop old backups/forwards
+
+            if not voice_elems:
+                continue
+
+            # Rebuild measure: preamble, then each voice with backup between
+            for ch in list(measure):
+                measure.remove(ch)
+            for ch in preamble:
+                measure.append(ch)
+
+            sorted_voices = sorted(voice_elems.keys())
+            for vi, v in enumerate(sorted_voices):
+                if vi > 0:
+                    backup = ET.SubElement(measure, "backup")
+                    ET.SubElement(backup, "duration").text = str(expected_dur)
+                for ch in voice_elems[v]:
+                    measure.append(ch)
+            for ch in pending_dirs:
+                measure.append(ch)
+
+            count += 1
+
+    return count
+
+
+_TRIPLET_TYPE_QL = {
+    "whole": 4.0, "half": 2.0, "quarter": 1.0,
+    "eighth": 0.5, "16th": 0.25, "32nd": 0.125,
+}
+
+
+def _mark_unmarked_triplets(root):
+    """Detect notes with triplet durations and mark them.
+
+    Two passes:
+    1. Exact match: each note's duration == expected * 2/3 exactly.
+    2. Group match: runs of same-type notes whose total == N * expected * 2/3,
+       even if individual durations are imprecise. Corrects durations.
+    Returns the number of notes marked.
+    """
+    parts = root.findall("part")
+    total_marked = 0
+
+    for part in parts:
+        cur_divs = 1
+
+        for measure in part.findall("measure"):
+            d = measure.find(".//divisions")
+            if d is not None:
+                try:
+                    cur_divs = int(d.text)
+                except (ValueError, TypeError):
+                    pass
+
+            voice_notes = {}
+            for ch in measure:
+                if ch.tag != "note":
+                    continue
+                if ch.find("time-modification") is not None:
+                    continue
+                v = ch.findtext("voice", "1")
+                is_chord = ch.find("chord") is not None
+                voice_notes.setdefault(v, []).append((ch, is_chord))
+
+            for v, entries in voice_notes.items():
+                main_notes = [(n, idx) for idx, (n, is_chord) in enumerate(entries)
+                              if not is_chord]
+
+                # Pass 1: exact match (divisions must allow clean triplets)
+                i = 0
+                while i < len(main_notes):
+                    n, _ = main_notes[i]
+                    typ = n.findtext("type", "")
+                    ql = _TRIPLET_TYPE_QL.get(typ, 0)
+                    if ql <= 0:
+                        i += 1
+                        continue
+                    expected_d = round(ql * cur_divs)
+                    if expected_d * 2 % 3 != 0:
+                        i += 1
+                        continue
+                    dur = int(n.findtext("duration", "0"))
+                    triplet_d = expected_d * 2 // 3
+                    if dur != triplet_d or triplet_d <= 0:
+                        i += 1
+                        continue
+
+                    run = 1
+                    while i + run < len(main_notes):
+                        nn, _ = main_notes[i + run]
+                        ntyp = nn.findtext("type", "")
+                        nql = _TRIPLET_TYPE_QL.get(ntyp, 0)
+                        if nql <= 0:
+                            break
+                        nexp = round(nql * cur_divs)
+                        if nexp * 2 % 3 != 0:
+                            break
+                        ndur = int(nn.findtext("duration", "0"))
+                        ntrip = nexp * 2 // 3
+                        if ndur != ntrip:
+                            break
+                        run += 1
+
+                    groups = run // 3
+                    if groups > 0:
+                        total_marked += _apply_triplet_markup(
+                            main_notes, entries, i, groups)
+                    i += groups * 3 if groups > 0 else 1
+
+                # Pass 2: group-total match (for imprecise durations)
+                i = 0
+                while i < len(main_notes):
+                    n, _ = main_notes[i]
+                    if n.find("time-modification") is not None:
+                        i += 1
+                        continue
+                    typ = n.findtext("type", "")
+                    ql = _TRIPLET_TYPE_QL.get(typ, 0)
+                    if ql <= 0:
+                        i += 1
+                        continue
+                    expected_d = round(ql * cur_divs)
+                    if expected_d < 2:
+                        i += 1
+                        continue
+
+                    run = 1
+                    while i + run < len(main_notes):
+                        nn, _ = main_notes[i + run]
+                        if nn.find("time-modification") is not None:
+                            break
+                        ntyp = nn.findtext("type", "")
+                        if ntyp != typ:
+                            break
+                        run += 1
+
+                    groups = run // 3
+                    if groups > 0:
+                        run_len = groups * 3
+                        run_total = sum(
+                            int(main_notes[i + j][0].findtext("duration", "0"))
+                            for j in range(run_len))
+                        expected_triplet_total = round(run_len * expected_d * 2 / 3)
+                        if run_total == expected_triplet_total:
+                            _fix_triplet_durations(
+                                main_notes, entries, i, groups, expected_d)
+                            total_marked += _apply_triplet_markup(
+                                main_notes, entries, i, groups)
+                            i += run_len
+                            continue
+                    i += 1
+
+    return total_marked
+
+
+def _fix_triplet_durations(main_notes, entries, start, groups, expected_d):
+    """Correct note durations to proper triplet values for imprecise groups."""
+    group_total = expected_d * 2
+    base_d = group_total // 3
+    extra = group_total % 3
+    for g in range(groups):
+        for j in range(3):
+            mn_note, mn_idx = main_notes[start + g * 3 + j]
+            correct_d = base_d + (1 if j < extra else 0)
+            d_elem = mn_note.find("duration")
+            if d_elem is not None:
+                d_elem.text = str(correct_d)
+            for ci in range(mn_idx + 1, len(entries)):
+                cn, cn_chord = entries[ci]
+                if not cn_chord:
+                    break
+                cd = cn.find("duration")
+                if cd is not None:
+                    cd.text = str(correct_d)
+
+
+def _apply_triplet_markup(main_notes, entries, start, groups):
+    """Add time-modification and tuplet notation to groups of 3 notes."""
+    marked = 0
+    for g in range(groups):
+        for j in range(3):
+            mn_note, mn_idx = main_notes[start + g * 3 + j]
+            all_notes = [mn_note]
+            for ci in range(mn_idx + 1, len(entries)):
+                cn, cn_chord = entries[ci]
+                if not cn_chord:
+                    break
+                all_notes.append(cn)
+            for note in all_notes:
+                if note.find("time-modification") is None:
+                    tm = ET.SubElement(note, "time-modification")
+                    ET.SubElement(tm, "actual-notes").text = "3"
+                    ET.SubElement(tm, "normal-notes").text = "2"
+                    marked += 1
+            notations = mn_note.find("notations")
+            if notations is None:
+                notations = ET.SubElement(mn_note, "notations")
+            if j == 0:
+                ET.SubElement(notations, "tuplet",
+                              type="start", bracket="yes", number="1")
+            elif j == 2:
+                ET.SubElement(notations, "tuplet",
+                              type="stop", number="1")
+    return marked
+
+
+# ── Notated overflow fix: remove excess rests when types exceed bar ──
+
+def _fix_notated_overflow(root):
+    """Remove excess rests when type-based voice total exceeds bar duration.
+
+    E.g., whole(4 beats) + rest-eighth(0.5) + rest-quarter(1) in 4/4
+    = 5.5 beats > 4 → remove the rests and set whole duration to fill bar.
+    """
+    _TYPE_BEATS = {
+        "breve": 8.0, "whole": 4.0, "half": 2.0, "quarter": 1.0,
+        "eighth": 0.5, "16th": 0.25, "32nd": 0.125, "64th": 0.0625,
+    }
+    removed = 0
+    for part in (root.findall(".//part") or root.findall("part")):
+        divs = 1
+        ts_beats, ts_btype = 4, 4
+        for measure in part.findall("measure"):
+            att = measure.find("attributes")
+            if att is not None:
+                d = att.findtext("divisions")
+                if d:
+                    try:
+                        divs = int(d)
+                    except ValueError:
+                        pass
+                t = att.find("time")
+                if t is not None:
+                    try:
+                        ts_beats = int(t.findtext("beats", "4"))
+                        ts_btype = int(t.findtext("beat-type", "4"))
+                    except ValueError:
+                        pass
+
+            expected_beats = ts_beats * (4.0 / ts_btype)
+
+            voices = {}
+            for child in measure:
+                if child.tag != "note" or child.find("grace") is not None:
+                    continue
+                if child.find("chord") is not None:
+                    continue
+                v = child.findtext("voice", "1")
+                typ = child.findtext("type", "")
+                ndots = len(child.findall("dot"))
+                trip = child.find("time-modification") is not None
+                is_rest = child.find("rest") is not None
+                tb = _TYPE_BEATS.get(typ, 0)
+                for _ in range(ndots):
+                    tb *= 1.5
+                if trip:
+                    tb *= 2.0 / 3.0
+                if v not in voices:
+                    voices[v] = []
+                voices[v].append((child, tb, is_rest))
+
+            for v, entries in voices.items():
+                total = sum(e[1] for e in entries)
+                if total <= expected_beats + 0.01:
+                    continue
+                overflow = total - expected_beats
+                rests = [e for e in entries if e[2]]
+                rests.sort(key=lambda e: -e[1])
+                to_remove = []
+                remaining = overflow
+                for entry in rests:
+                    if remaining <= 0.01:
+                        break
+                    if entry[1] <= remaining + 0.01:
+                        to_remove.append(entry[0])
+                        remaining -= entry[1]
+                if abs(remaining) > 0.01:
+                    continue
+                for el in to_remove:
+                    measure.remove(el)
+                    removed += 1
+                for child in measure:
+                    if child.tag != "note" or child.find("grace") is not None:
+                        continue
+                    if child.findtext("voice", "1") != v:
+                        continue
+                    exp_d = _td_note_expected(child, divs)
+                    if exp_d > 0:
+                        d_el = child.find("duration")
+                        if d_el is not None:
+                            d_el.text = str(exp_d)
+                _td_recalc_backups(measure)
+    return removed
+
+
+# ── Module-level type-duration alignment (used after merge too) ──
+
+_TD_TYPE_TO_QL = {
+    "breve": 8.0, "whole": 4.0, "half": 2.0, "quarter": 1.0,
+    "eighth": 0.5, "16th": 0.25, "32nd": 0.125, "64th": 0.0625,
+}
+_TD_QL_TO_TYPE = {v: k for k, v in _TD_TYPE_TO_QL.items()}
+_TD_SORTED_QLS = sorted(_TD_TYPE_TO_QL.values(), reverse=True)
+
+
+def _td_note_expected(note_el, divs):
+    ntype = note_el.findtext("type", "")
+    ql = _TD_TYPE_TO_QL.get(ntype, 0)
+    if ql == 0:
+        return 0
+    ndots = len(note_el.findall("dot"))
+    for _ in range(ndots):
+        ql *= 1.5
+    return round(ql * divs)
+
+
+def _td_measure_max_pos(measure):
+    pos, mx = 0, 0
+    for child in measure:
+        if child.tag == "note":
+            if child.find("chord") is not None:
+                continue
+            try:
+                pos += int(child.findtext("duration", "0"))
+            except (ValueError, TypeError):
+                pass
+            mx = max(mx, pos)
+        elif child.tag == "backup":
+            try:
+                pos -= int(child.findtext("duration", "0"))
+            except (ValueError, TypeError):
+                pass
+        elif child.tag == "forward":
+            try:
+                pos += int(child.findtext("duration", "0"))
+            except (ValueError, TypeError):
+                pass
+    return mx
+
+
+def _td_recalc_backups(measure):
+    seg = 0
+    for child in measure:
+        if child.tag == "note":
+            if child.find("chord") is None:
+                try:
+                    seg += int(child.findtext("duration", "0"))
+                except (ValueError, TypeError):
+                    pass
+        elif child.tag == "backup":
+            b_el = child.find("duration")
+            if b_el is not None:
+                b_el.text = str(seg)
+            seg = 0
+        elif child.tag == "forward":
+            try:
+                seg += int(child.findtext("duration", "0"))
+            except (ValueError, TypeError):
+                pass
+
+
+def _fix_type_duration_alignment(root, label=""):
+    """Fix type-duration mismatches.  Phase 1: retype (safe). Phase 2: realign durations."""
+    parts = root.findall(".//part") or root.findall("part")
+    fixes = []
+
+    # Phase 1: update types to match durations (no duration changes)
+    for pi, part in enumerate(parts):
+        pid = part.get("id", f"P{pi+1}")
+        e_divs = 1
+        for measure in part.findall("measure"):
+            mn = measure.get("number", "?")
+            dv = measure.find(".//divisions")
+            if dv is not None:
+                try:
+                    e_divs = int(dv.text)
+                except (ValueError, TypeError):
+                    pass
+            if e_divs <= 0:
+                continue
+            n_fixed = 0
+            for note in measure.findall("note"):
+                type_el = note.find("type")
+                dur_el = note.find("duration")
+                if type_el is None or dur_el is None:
+                    continue
+                ntype = type_el.text
+                if ntype not in _TD_TYPE_TO_QL:
+                    continue
+                try:
+                    dur = int(dur_el.text)
+                except (ValueError, TypeError):
+                    continue
+                exp = _td_note_expected(note, e_divs)
+                if dur == exp:
+                    continue
+                ql = dur / e_divs
+                for sq in _TD_SORTED_QLS:
+                    if abs(ql - sq) < 0.001:
+                        type_el.text = _TD_QL_TO_TYPE[sq]
+                        for d in note.findall("dot"):
+                            note.remove(d)
+                        n_fixed += 1
+                        break
+                    if abs(ql - sq * 1.5) < 0.001:
+                        type_el.text = _TD_QL_TO_TYPE[sq]
+                        for d in note.findall("dot"):
+                            note.remove(d)
+                        ET.SubElement(note, "dot")
+                        n_fixed += 1
+                        break
+            if n_fixed:
+                fixes.append(f"{pid} m{mn}: {label}retyped {n_fixed} notes")
+
+    # Phase 2: for remaining mismatches, change durations to match types + compensate
+    for pi, part in enumerate(parts):
+        pid = part.get("id", f"P{pi+1}")
+        e_divs = 1
+        e_beats, e_bt = 4, 4
+        for measure in part.findall("measure"):
+            mn = measure.get("number", "?")
+            t = measure.find(".//time")
+            if t is not None:
+                try:
+                    e_beats = int(t.findtext("beats", "4"))
+                    e_bt = int(t.findtext("beat-type", "4"))
+                except ValueError:
+                    pass
+            dv = measure.find(".//divisions")
+            if dv is not None:
+                try:
+                    e_divs = int(dv.text)
+                except (ValueError, TypeError):
+                    pass
+            if e_divs <= 0:
+                continue
+            expected_dur = round(e_beats * e_divs * 4.0 / e_bt)
+            notes = [c for c in measure if c.tag == "note"]
+            if not notes:
+                continue
+            mismatches = []
+            for note in notes:
+                exp_d = _td_note_expected(note, e_divs)
+                if exp_d <= 0:
+                    continue
+                dur_el = note.find("duration")
+                if dur_el is None:
+                    continue
+                try:
+                    cur_d = int(dur_el.text)
+                except (ValueError, TypeError):
+                    continue
+                if cur_d != exp_d:
+                    mismatches.append((note, dur_el, cur_d, exp_d))
+            if not mismatches:
+                continue
+            old_state = {}
+            for child in measure:
+                if child.tag in ("note", "backup", "forward"):
+                    d_el = child.find("duration")
+                    if d_el is not None:
+                        old_state[d_el] = d_el.text
+            adjusted_els = set()
+            for note, dur_el, _, exp_d in mismatches:
+                dur_el.text = str(exp_d)
+                adjusted_els.add(id(dur_el))
+                for ch in measure:
+                    if ch.tag == "note" and ch.find("chord") is not None:
+                        cd = ch.find("duration")
+                        if cd is not None and id(cd) in {id(d) for _, d, _, _ in mismatches}:
+                            continue
+                        prev_main = None
+                        for ch2 in measure:
+                            if ch2 is ch:
+                                break
+                            if ch2.tag == "note" and ch2.find("chord") is None:
+                                prev_main = ch2
+                        if prev_main is note and cd is not None:
+                            cd.text = str(exp_d)
+                            adjusted_els.add(id(cd))
+            _td_recalc_backups(measure)
+            new_dur = _td_measure_max_pos(measure)
+            if new_dur == expected_dur:
+                fixes.append(f"{pid} m{mn}: {label}realigned {len(mismatches)} notes")
+                continue
+            residual = new_dur - expected_dur
+            # Try compensation: prefer rests, then non-adjusted notes, avoid adjusted notes
+            candidates = []
+            for child in measure:
+                if child.tag == "note" and child.find("chord") is None:
+                    d_el = child.find("duration")
+                    if d_el is None:
+                        continue
+                    try:
+                        v = int(d_el.text)
+                    except (ValueError, TypeError):
+                        continue
+                    if v - residual <= 0:
+                        continue
+                    is_rest = child.find("rest") is not None
+                    is_adjusted = id(d_el) in adjusted_els
+                    # Priority: rest=0 (best), non-adjusted=1, adjusted=2 (worst)
+                    priority = 0 if is_rest else (2 if is_adjusted else 1)
+                    candidates.append((priority, -v, id(d_el), d_el, v))
+            candidates.sort()
+            if candidates:
+                _, _, _, best_el, best_v = candidates[0]
+                best_el.text = str(best_v - residual)
+                _td_recalc_backups(measure)
+                fixes.append(f"{pid} m{mn}: {label}realigned {len(mismatches)} notes + compensated")
+            else:
+                for d_el, oval in old_state.items():
+                    d_el.text = oval
+    return fixes
 
 STANDARD_RANGES = {
     "Flute": (60, 96), "Piccolo": (74, 108),
@@ -1122,6 +3411,9 @@ def merge_pages(page_xmls: List[str], output_path: str):
             pid = part.get("id")
             sp = root.find(f'.//score-part[@id="{pid}"]')
             name = sp.findtext("part-name", "?") if sp is not None else "?"
+            base = re.sub(r'\s+\d+$', '', name)
+            if _instrument_base(base) in INSTRUMENT_MIDI:
+                name = base
             measures = part.findall("measure")
             info.append({"name": name, "part": part, "score_part": sp,
                          "measures": measures, "n_measures": len(measures)})
@@ -1152,7 +3444,7 @@ def merge_pages(page_xmls: List[str], output_path: str):
     order_map = {name: i for i, name in enumerate(ORCHESTRAL_ORDER)}
     master_parts = []
     for name, max_occ in sorted(all_instruments.items(),
-                                 key=lambda x: order_map.get(x[0], 99)):
+                                 key=lambda x: order_map.get(_instrument_base(x[0]), 99)):
         for occ in range(max_occ):
             master_parts.append((name, occ))
 
@@ -1211,13 +3503,46 @@ def merge_pages(page_xmls: List[str], output_path: str):
         ET.SubElement(sp, "part-name").text = display_name
         si = ET.SubElement(sp, "score-instrument", id=f"{pid}-I1")
         ET.SubElement(si, "instrument-name").text = name
-        sound, midi_prog = INSTRUMENT_MIDI.get(name, ("keyboard.piano", 1))
+        sound, midi_prog = INSTRUMENT_MIDI.get(_instrument_base(name), ("keyboard.piano", 1))
         ET.SubElement(si, "instrument-sound").text = sound
         midi_el = ET.SubElement(sp, "midi-instrument", id=f"{pid}-I1")
         ET.SubElement(midi_el, "midi-channel").text = "1"
         ET.SubElement(midi_el, "midi-program").text = str(midi_prog)
         ET.SubElement(midi_el, "volume").text = "100"
         ET.SubElement(midi_el, "pan").text = "0"
+
+    # Detect pickup (anacrusis) in first page's first measure
+    pickup_ticks = None
+    beats_0, bt_0 = page_time_sigs[0]
+    full_m1 = target_divs * beats_0 * 4 // bt_0
+    for pi in page_data[0]:
+        if not pi["measures"]:
+            continue
+        m1 = pi["measures"][0]
+        m1_divs, pos, max_pos = 1, 0, 0
+        for el in m1:
+            if el.tag == "attributes":
+                d = el.findtext("divisions")
+                if d:
+                    try: m1_divs = int(d)
+                    except ValueError: pass
+            elif el.tag == "note" and el.find("chord") is None:
+                d = el.findtext("duration")
+                if d:
+                    pos += round(int(d) * target_divs / m1_divs)
+                    max_pos = max(max_pos, pos)
+            elif el.tag == "backup":
+                d = el.findtext("duration")
+                if d: pos -= round(int(d) * target_divs / m1_divs)
+            elif el.tag == "forward":
+                d = el.findtext("duration")
+                if d:
+                    pos += round(int(d) * target_divs / m1_divs)
+                    max_pos = max(max_pos, pos)
+        if 0 < max_pos < full_m1:
+            pickup_ticks = max_pos
+            print(f"[Merge] Pickup detected: {pickup_ticks}/{full_m1} ticks")
+            break
 
     # Concatenate measures for each master part, normalizing divisions
     for mi, (name, occ) in enumerate(master_parts):
@@ -1269,9 +3594,11 @@ def merge_pages(page_xmls: List[str], output_path: str):
                     measure_num += 1
             else:
                 for mi2 in range(n_measures):
+                    dur_ovr = pickup_ticks if (measure_num == 1 and pickup_ticks is not None) else None
                     part_el.append(_make_rest_measure(
                         measure_num, target_divs, beats, beat_type,
-                        include_attrs=(measure_num == 1 or mi2 == 0)))
+                        include_attrs=(measure_num == 1 or mi2 == 0),
+                        duration_override=dur_ovr))
                     measure_num += 1
 
         # ensure first measure always has attributes/divisions
@@ -1286,10 +3613,36 @@ def merge_pages(page_xmls: List[str], output_path: str):
                 d_el = ET.Element("divisions")
                 d_el.text = str(target_divs)
                 attrs.insert(0, d_el)
+            if attrs.find("transpose") is None:
+                _inject_transpose(attrs, name)
+
+    # Post-merge type-duration alignment
+    overflow_n = _fix_notated_overflow(merged_root)
+    if overflow_n:
+        print(f"[Merge] Notated overflow: removed {overflow_n} excess rests")
+    td_fixes = _fix_type_duration_alignment(merged_root, label="merge-")
+    if td_fixes:
+        print(f"[Merge] Type-duration alignment: {len(td_fixes)} fixes")
+
+    # Post-merge per-voice duration fix
+    vfix_count = _fix_voice_durations(merged_root)
+    if vfix_count:
+        print(f"[Merge] Voice duration fixes: {vfix_count}")
+
+    # Post-merge triplet marking
+    trip_count = _mark_unmarked_triplets(merged_root)
+    if trip_count:
+        print(f"[Merge] Triplet marking: {trip_count} notes")
+
+    # Final type-duration alignment (cleans up mismatches created by V-fix)
+    overflow_n2 = _fix_notated_overflow(merged_root)
+    if overflow_n2:
+        print(f"[Merge] Final overflow: removed {overflow_n2} excess rests")
+    td_fixes2 = _fix_type_duration_alignment(merged_root, label="final-")
+    if td_fixes2:
+        print(f"[Merge] Final type-duration alignment: {len(td_fixes2)} fixes")
 
     xml_string = ET.tostring(merged_root, encoding="unicode", xml_declaration=True)
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(xml_string)
     print(f"[Merge] Written: {output_path}")
@@ -1315,7 +3668,8 @@ def _deep_copy_element(elem):
     return new
 
 
-def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True):
+def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True,
+                       duration_override=None):
     """Create an empty rest measure with correct divisions."""
     m = ET.Element("measure", number=str(number))
     if include_attrs:
@@ -1323,9 +3677,14 @@ def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True):
         ET.SubElement(attrs, "divisions").text = str(divs)
     rest = ET.SubElement(m, "note")
     ET.SubElement(rest, "rest")
-    dur = ET.SubElement(rest, "duration")
-    dur.text = str(divs * beats * 4 // beat_type)
-    ET.SubElement(rest, "type").text = "whole"
+    if duration_override is not None:
+        rest_dur = duration_override
+    else:
+        rest_dur = divs * beats * 4 // beat_type
+    ET.SubElement(rest, "duration").text = str(rest_dur)
+    ql = rest_dur / divs
+    rest_type = _TD_QL_TO_TYPE.get(ql, "whole")
+    ET.SubElement(rest, "type").text = rest_type
     return m
 
 
@@ -1333,20 +3692,42 @@ def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True):
 # Main pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm: bool = True) -> str:
+def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm: bool = True,
+                 tremolo_templates: str = None, part_names_override: List[str] = None) -> str:
     """Full pipeline: image → MusicXML."""
     print(f"\n{'='*60}")
     print(f"Processing: {img_path}")
     print(f"{'='*60}")
     t_start = time.time()
 
-    xml_string, part_names = run_homr_pipeline(img_path, use_gpu=use_gpu, use_vlm=use_vlm)
-    xml_string = _inject_part_names(xml_string, part_names)
-    xml_string = _cross_part_post_process(xml_string)
+    results = run_homr_pipeline(
+        img_path, use_gpu=use_gpu, use_vlm=use_vlm,
+        tremolo_templates=tremolo_templates,
+    )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(xml_string)
+
+    if len(results) == 1:
+        xml_string, part_names = results[0]
+        if part_names_override is not None:
+            part_names = part_names_override
+        xml_string = _inject_part_names(xml_string, part_names)
+        xml_string = _cross_part_post_process(xml_string)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(xml_string)
+    else:
+        import tempfile
+        temp_files = []
+        for sys_idx, (xml_string, sys_names) in enumerate(results):
+            xml_string = _inject_part_names(xml_string, sys_names)
+            xml_string = _cross_part_post_process(xml_string)
+            base, ext = os.path.splitext(output_path)
+            sys_path = f"{base}_sys{sys_idx}{ext}"
+            with open(sys_path, "w", encoding="utf-8") as f:
+                f.write(xml_string)
+            temp_files.append(sys_path)
+            print(f"[MultiSys] System {sys_idx + 1}: {sys_path}")
+        merge_pages(temp_files, output_path)
 
     elapsed = time.time() - t_start
     print(f"\n[Done] {output_path} ({elapsed:.1f}s)")
@@ -1366,10 +3747,13 @@ def main():
     parser.add_argument("--no-vlm", action="store_true", help="Disable VLM instrument OCR (use RapidOCR fallback)")
     parser.add_argument("--check", action="store_true",
                         help="Run quality check after processing (piano roll + issue report)")
+    parser.add_argument("--tremolo-templates", default=None,
+                        help="Directory with tremolo_tight_*.png templates for tremolo detection")
     args = parser.parse_args()
 
     use_gpu = not args.no_gpu
     use_vlm = not args.no_vlm
+    tremolo_tpl = args.tremolo_templates
 
     inputs = [Path(p) for p in args.input]
 
@@ -1380,7 +3764,8 @@ def main():
         for img_file in sorted(inputs[0].glob("*.png")):
             out_path = os.path.join(out_dir, img_file.stem + ".musicxml")
             try:
-                run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm)
+                run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm,
+                             tremolo_templates=tremolo_tpl)
                 if args.check:
                     quality_check(out_path)
             except Exception as e:
@@ -1391,7 +3776,8 @@ def main():
     # Single file mode
     if len(inputs) == 1 and inputs[0].is_file():
         out = args.output or str(inputs[0].with_suffix(".musicxml"))
-        run_pipeline(str(inputs[0]), out, use_gpu=use_gpu, use_vlm=use_vlm)
+        run_pipeline(str(inputs[0]), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                     tremolo_templates=tremolo_tpl)
         if args.check:
             quality_check(out)
         return
@@ -1404,7 +3790,8 @@ def main():
                 print(f"Error: {img_path} not found")
                 sys.exit(1)
             out = str(img_path.with_suffix(".musicxml"))
-            run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm)
+            run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                         tremolo_templates=tremolo_tpl)
             page_xmls.append(out)
 
         merged_out = args.output
