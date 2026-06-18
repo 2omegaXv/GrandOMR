@@ -1668,9 +1668,12 @@ German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C
 def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
     """Detect instrument names for a non-first system via VLM on left-margin crop."""
     n = len(sys_staves)
-    if not use_vlm or n == 0:
+    if n == 0:
+        return []
+    if not use_vlm:
         return [f"Part {i + 1}" for i in range(n)]
 
+    fallback_names = [f"Part {i + 1}" for i in range(n)]
     try:
         import base64, io
         from PIL import Image as PILImage
@@ -1747,7 +1750,22 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
     except Exception as e:
         print(f"[VLM-extra] Failed: {e}")
 
-    return [f"Part {i + 1}" for i in range(n)]
+    try:
+        avg_unit = float(np.median([s.average_unit_size for s in sys_staves]))
+        staff_left = min(s.min_x for s in sys_staves)
+        bracket_groups = [[i] for i in range(n)]
+        ocr_names = _rapidocr_instrument_names(
+            sys_staves, image, bracket_groups, n, avg_unit, staff_left)
+        master_bases = set(_instrument_base(nm) for nm in master_names)
+        valid = sum(1 for nm in ocr_names if _instrument_base(nm) in master_bases)
+        if valid >= max(1, n * 0.4):
+            print(f"[OCR-extra] System names ({valid}/{n} matched master): {ocr_names}")
+            return ocr_names
+        print(f"[OCR-extra] Weak match ({valid}/{n}), using generic names")
+    except Exception as e:
+        print(f"[OCR-extra] Failed: {e}")
+
+    return fallback_names
 
 
 def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
@@ -3950,17 +3968,21 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
     else:
         import tempfile
         temp_files = []
+        system_master_names = None
         for sys_idx, (xml_string, sys_names) in enumerate(results):
-            if not sys_names and part_names_override is not None:
-                sys_names = list(part_names_override)
-                print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
-            elif part_names_override is not None:
-                if len(part_names_override) == len(sys_names):
-                    sys_names = list(part_names_override)
-                else:
-                    sys_names = _match_override_to_detected(part_names_override, sys_names, xml_string)
             if sys_idx == 0:
                 final_names = sys_names
+                system_master_names = list(part_names_override or sys_names or [])
+            else:
+                master_names = list(part_names_override or system_master_names or [])
+                if not sys_names and master_names:
+                    sys_names = list(master_names)
+                    print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
+                elif master_names:
+                    if len(master_names) == len(sys_names):
+                        sys_names = list(master_names)
+                    else:
+                        sys_names = _match_override_to_detected(master_names, sys_names, xml_string)
             xml_string = _inject_part_names(xml_string, sys_names)
             xml_string = _cross_part_post_process(xml_string)
             base, ext = os.path.splitext(output_path)
