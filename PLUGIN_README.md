@@ -19,21 +19,22 @@ The normal MusicXML output path is still written. `--plugin-output` additionally
 ```text
 score_plugin/
   score.musicxml
+  score.tagged.musicxml
   manifest.json
   notes.json
   pages/
     page_0001.png
 ```
 
-Open `score_plugin/score.musicxml` in MuseScore when using the viewer.
+Open `score_plugin/score.musicxml` in MuseScore when using the viewer. This is the clean MusicXML. `score.tagged.musicxml` is used only by the viewer to build the internal `omrId -> scoreNoteIndex` map.
 
 ## Start Viewer/Bridge
 
 ```powershell
-python grandomr_viewer.py outputs/score_plugin
+python grandomr_viewer.py outputs/score_plugin --musescore "C:\Program Files\MuseScore 4\bin\MuseScore4.exe"
 ```
 
-This starts `http://127.0.0.1:8765/` and opens the browser viewer.
+This runs MuseScore CLI with `--score-elements -f` on `score.tagged.musicxml`, starts `http://127.0.0.1:8765/`, and opens the browser viewer. If `--musescore` is omitted, the viewer tries `MuseScore4.exe` and `MuseScore4` from `PATH`.
 
 ## MuseScore
 

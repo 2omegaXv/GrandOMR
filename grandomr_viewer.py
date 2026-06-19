@@ -4,6 +4,8 @@
 import argparse
 import json
 import mimetypes
+import shutil
+import subprocess
 import threading
 import time
 import webbrowser
@@ -13,10 +15,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 class BridgeState:
-    def __init__(self, root_dir: Path, manifest: dict, notes: list[dict]) -> None:
+    def __init__(self, root_dir: Path, manifest: dict, notes: list[dict], debug: bool = False) -> None:
         self.root_dir = root_dir
         self.manifest = manifest
         self.notes = notes
+        self.debug = debug
+        self.note_by_id = {note.get("omrId"): note for note in notes if note.get("omrId")}
         self.lock = threading.Lock()
         self.sequence = 0
         self.selector = None
@@ -26,23 +30,19 @@ class BridgeState:
         self.last_poll = 0.0
 
     def set_note(self, omr_id: str) -> dict | None:
-        note = next((n for n in self.notes if n.get("omrId") == omr_id), None)
+        note = self.note_by_id.get(omr_id)
         if note is None:
             return None
+        score_note_index = note.get("scoreNoteIndex")
+        if score_note_index is None:
+            raise ValueError(f"No MuseScore scoreNoteIndex for {omr_id}; tagged MusicXML did not map this note")
         with self.lock:
             self.sequence += 1
-            raw_selector = note["selector"]
             selector = {
-                "partIdx": raw_selector.get("partIdx", 0),
-                "staffIdx": raw_selector.get("staffIdx", 0),
-                "voiceIdx": raw_selector.get("voiceIdx", 0),
-                "measureIdx": raw_selector.get("measureIdx", 0),
-                "beat": raw_selector.get("beat", 0),
-                "pitch": raw_selector.get("pitch"),
-                "noteIndex": raw_selector.get("noteIndex", 0),
+                "scoreNoteIndex": score_note_index,
+                "omrId": omr_id,
             }
             selector["sequence"] = self.sequence
-            selector["omrId"] = omr_id
             self.selector = selector
             self.selected[str(self.sequence)] = {
                 "pending": True,
@@ -78,10 +78,176 @@ class BridgeState:
                 if self.last_poll == 0
                 else round(time.time() - self.last_poll, 2),
                 "selected": self.selected,
+                "debug": self.debug,
             }
 
 
 STATE: BridgeState | None = None
+
+
+def find_musescore(explicit_path: str | None) -> str:
+    if explicit_path:
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(f"MuseScore CLI not found: {explicit_path}")
+        return str(path)
+    for candidate in ("MuseScore4.exe", "MuseScore4"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise FileNotFoundError(
+        "MuseScore CLI not found. Pass --musescore \"C:\\Program Files\\MuseScore 4\\bin\\MuseScore4.exe\""
+    )
+
+
+def run_score_elements(musescore: str, score_path: Path) -> list[dict]:
+    result = subprocess.run(
+        [musescore, "--score-elements", "-f", str(score_path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "MuseScore --score-elements failed with code "
+            f"{result.returncode}\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MuseScore --score-elements returned invalid JSON: {exc}") from exc
+
+
+def midi_from_name(name: str | None) -> int | None:
+    if not name:
+        return None
+    base = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+    text = str(name)
+    if len(text) < 2 or text[0] not in base:
+        return None
+    idx = 1
+    alter = 0
+    while idx < len(text) and text[idx] in ("#", "b"):
+        alter += 1 if text[idx] == "#" else -1
+        idx += 1
+    try:
+        octave = int(text[idx:])
+    except ValueError:
+        return None
+    return (octave + 1) * 12 + base[text[0]] + alter
+
+
+def build_score_note_map(score_elements: list[dict]) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    all_note_rows: list[dict] = []
+    element_order = 0
+    for part_idx, part in enumerate(score_elements):
+        pending_notes_by_slot: dict[tuple, list[dict]] = {}
+        pending_chord_by_slot: dict[tuple, dict] = {}
+        for element in part.get("elements", []):
+            element_type = element.get("type")
+            slot = (
+                element.get("staffIdx"),
+                element.get("voiceIdx"),
+                element.get("measureIdx"),
+                element.get("beat"),
+            )
+            if element_type == "Note":
+                note_row = {
+                    "partIdx": part_idx,
+                    "staffIdx": element.get("staffIdx"),
+                    "voiceIdx": element.get("voiceIdx"),
+                    "measureIdx": element.get("measureIdx"),
+                    "beat": element.get("beat"),
+                    "name": element.get("name"),
+                    "pitch": midi_from_name(element.get("name")),
+                    "duration": element.get("duration"),
+                    "_elementOrder": element_order,
+                }
+                all_note_rows.append(note_row)
+                pending_notes_by_slot.setdefault(slot, []).append(note_row)
+                pending_chord_by_slot.pop(slot, None)
+                element_order += 1
+            elif element_type == "Chord":
+                notes = element.get("notes") or []
+                chord_rows = []
+                for chord_note_index, note in enumerate(notes):
+                    note_row = {
+                        "partIdx": part_idx,
+                        "staffIdx": element.get("staffIdx"),
+                        "voiceIdx": element.get("voiceIdx"),
+                        "measureIdx": element.get("measureIdx"),
+                        "beat": element.get("beat"),
+                        "name": note.get("name"),
+                        "pitch": midi_from_name(note.get("name")),
+                        "duration": element.get("duration"),
+                        "chordNoteIndex": chord_note_index,
+                        "chordNoteCount": len(notes),
+                        "_elementOrder": element_order,
+                    }
+                    all_note_rows.append(note_row)
+                    chord_rows.append(note_row)
+                    element_order += 1
+                if chord_rows:
+                    pending_chord_by_slot[slot] = {"rows": chord_rows, "nextLyricIndex": 0}
+                    pending_notes_by_slot.pop(slot, None)
+            elif element_type == "Lyrics":
+                text = str(element.get("text") or "")
+                if not text.startswith("GOMR:"):
+                    continue
+                omr_id = text[len("GOMR:") :]
+                pending_chord = pending_chord_by_slot.get(slot)
+                if pending_chord is not None:
+                    lyric_index = pending_chord["nextLyricIndex"]
+                    chord_rows = pending_chord["rows"]
+                    if lyric_index < len(chord_rows):
+                        note_row = chord_rows[lyric_index]
+                        pending_chord["nextLyricIndex"] = lyric_index + 1
+                    else:
+                        note_row = None
+                else:
+                    pending_notes = pending_notes_by_slot.get(slot)
+                    note_row = pending_notes.pop() if pending_notes else None
+                if note_row is not None:
+                    note_row["omrId"] = omr_id
+                    rows[omr_id] = note_row
+    scan_rows = sorted(
+        all_note_rows,
+        key=lambda row: (
+            int(row.get("staffIdx") or 0) * 4 + int(row.get("voiceIdx") or 0),
+            int(row.get("measureIdx") or 0),
+            float(row.get("beat") or 0),
+            row.get("_elementOrder", 0),
+        ),
+    )
+    for score_note_index, row in enumerate(scan_rows):
+        row["scoreNoteIndex"] = score_note_index
+    for row in rows.values():
+        row.pop("_elementOrder", None)
+    return rows
+
+
+def attach_score_note_indices(root_dir: Path, manifest: dict, notes: list[dict], musescore: str) -> None:
+    tagged_path = root_dir / manifest.get("taggedMusicxmlPath", "score.tagged.musicxml")
+    if not tagged_path.is_file():
+        raise FileNotFoundError(f"Tagged MusicXML not found: {tagged_path}")
+    score_elements = run_score_elements(musescore, tagged_path)
+    id_map = build_score_note_map(score_elements)
+    missing = []
+    for note in notes:
+        omr_id = note.get("omrId")
+        mapped = id_map.get(omr_id)
+        if mapped is None:
+            missing.append(omr_id)
+            continue
+        note.update(mapped)
+    if missing:
+        print(f"[Viewer] Warning: {len(missing)} clickable notes have no MuseScore scoreNoteIndex")
+    notes[:] = [note for note in notes if note.get("scoreNoteIndex") is not None]
+    print(f"[Viewer] MuseScore id map: {len(id_map)} mapped notes from {tagged_path}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -95,6 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({
                     "manifest": STATE.manifest,
                     "notes": STATE.notes,
+                    "debug": STATE.debug,
                 })
             elif parsed.path == "/api/select":
                 params = parse_qs(parsed.query)
@@ -196,6 +363,10 @@ def render_viewer() -> str:
       padding: 10px 14px; background: #ffffff; border-bottom: 1px solid #c7ced8; }
     #toolbar input { width: 72px; padding: 5px 7px; }
     #status { margin-left: auto; max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #detailPanel { display: none; position: sticky; top: 49px; z-index: 9; background: #f7f9fc; border-bottom: 1px solid #c7ced8;
+      padding: 8px 14px; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+    #detailText { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px Consolas, monospace; max-height: 150px; overflow: auto; }
+    #copyBtn { padding: 5px 9px; }
     #pages { width: min(1100px, calc(100vw - 28px)); margin: 14px auto 40px; }
     .page { position: relative; margin: 0 auto 18px; background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.22); }
     .page img { display: block; width: 100%; height: auto; }
@@ -212,12 +383,20 @@ def render_viewer() -> str:
     <button id="goBtn">Go</button>
     <span id="status">Loading</span>
   </div>
+  <div id="detailPanel">
+    <pre id="detailText">Click a note to show details.</pre>
+    <button id="copyBtn">Copy</button>
+  </div>
   <div id="pages"></div>
   <script>
     let notes = [];
     let selectedSeq = null;
+    let debugMode = false;
     const statusEl = document.getElementById('status');
     const pagesEl = document.getElementById('pages');
+    const detailPanel = document.getElementById('detailPanel');
+    const detailText = document.getElementById('detailText');
+    let lastDetail = '';
 
     function fileUrl(path) {
       return '/files/' + encodeURIComponent(path).replaceAll('%2F', '/');
@@ -227,6 +406,8 @@ def render_viewer() -> str:
       const res = await fetch('/api/data');
       const data = await res.json();
       notes = data.notes;
+      debugMode = Boolean(data.debug);
+      detailPanel.style.display = debugMode ? 'grid' : 'none';
       renderPages(data.manifest.pages);
       statusEl.textContent = `Loaded ${notes.length} notes`;
       setInterval(refreshStatus, 700);
@@ -248,19 +429,46 @@ def render_viewer() -> str:
           const box = document.createElement('div');
           box.className = 'note';
           box.dataset.omrId = note.omrId;
-          box.title = `${note.omrId} ${JSON.stringify(note.selector)}`;
+          box.title = `${note.omrId} #${note.scoreNoteIndex ?? 'unmapped'} ${note.name ?? ''}`;
           box.style.left = `${100 * x1 / page.width}%`;
           box.style.top = `${100 * y1 / page.height}%`;
           box.style.width = `${100 * (x2 - x1) / page.width}%`;
           box.style.height = `${100 * (y2 - y1) / page.height}%`;
           box.addEventListener('click', ev => {
             ev.stopPropagation();
+            if (debugMode) showNoteDetail(note);
             selectNote(note.omrId);
           });
           div.appendChild(box);
         }
         pagesEl.appendChild(div);
       }
+    }
+
+    function compactNote(note) {
+      return {
+        omrId: note.omrId,
+        scoreNoteIndex: note.scoreNoteIndex,
+        pageIndex: note.pageIndex,
+        staffIdx: note.staffIdx,
+        voiceIdx: note.voiceIdx,
+        measureIdx: note.measureIdx,
+        beat: note.beat,
+        name: note.name,
+        pitch: note.pitch,
+        chordNoteIndex: note.chordNoteIndex,
+        chordNoteCount: note.chordNoteCount,
+        musicXmlNoteIndex: note.musicXmlNoteIndex,
+        bbox: note.bbox,
+        center: note.center,
+        debug: note.debug
+      };
+    }
+
+    function showNoteDetail(note) {
+      const detail = compactNote(note);
+      lastDetail = JSON.stringify(detail, null, 2);
+      detailText.textContent = lastDetail;
     }
 
     async function selectNote(omrId) {
@@ -302,6 +510,16 @@ def render_viewer() -> str:
       const el = document.getElementById(`page-${page}`);
       if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'});
     });
+    document.getElementById('copyBtn').addEventListener('click', async () => {
+      if (!lastDetail) return;
+      try {
+        await navigator.clipboard.writeText(lastDetail);
+        statusEl.textContent = 'Copied note detail';
+      } catch (e) {
+        detailText.focus();
+        document.execCommand('selectAll');
+      }
+    });
     loadData();
   </script>
 </body>
@@ -327,12 +545,16 @@ def main() -> None:
     parser.add_argument("bundle", help="Plugin output directory or manifest.json")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--musescore", help="Path to MuseScore4.exe for --score-elements id mapping")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Show clicked-note debug details in the web viewer")
     args = parser.parse_args()
 
     global STATE
     root_dir, manifest, notes = load_bundle(Path(args.bundle))
-    STATE = BridgeState(root_dir, manifest, notes)
+    musescore = find_musescore(args.musescore)
+    attach_score_note_indices(root_dir, manifest, notes, musescore)
+    STATE = BridgeState(root_dir, manifest, notes, debug=args.debug)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"GrandOMR viewer: {url}")

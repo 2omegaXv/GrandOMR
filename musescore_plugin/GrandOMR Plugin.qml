@@ -17,6 +17,8 @@ MuseScore {
     property int lastSequence: -1
     property bool requestInFlight: false
     property bool connected: false
+    property bool showMarker: true
+    property var markerElement: null
     property string bridgeUrl: "http://127.0.0.1:8765"
 
     Column {
@@ -58,10 +60,20 @@ MuseScore {
                 text: "Clear Log"
                 onClicked: logBox.text = ""
             }
+            CheckBox {
+                text: "Marker"
+                checked: root.showMarker
+                onToggled: {
+                    root.showMarker = checked
+                    if (!checked) {
+                        clearMarker()
+                    }
+                }
+            }
             Label {
                 id: statusLabel
                 text: "Idle"
-                width: 300
+                width: 230
                 elide: Text.ElideRight
             }
         }
@@ -223,24 +235,12 @@ MuseScore {
         return 0
     }
 
-    function closeEnough(a, b) {
-        return Math.abs(a - b) < 0.01
-    }
-
-    function fieldValue(selector, canonicalName, fallbackValue) {
-        if (selector[canonicalName] !== undefined) {
-            return selector[canonicalName]
-        }
-        if (canonicalName === "measureIdx" && selector.measuredlx !== undefined) {
-            return selector.measuredlx
-        }
-        if (canonicalName === "voiceIdx" && selector.voiceldx !== undefined) {
-            return selector.voiceldx
-        }
-        if (canonicalName === "noteIndex" && selector.notelndex !== undefined) {
-            return selector.notelndex
-        }
-        return fallbackValue
+    function noteName(note) {
+        var names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        var pitch = note.pitch
+        var pc = ((pitch % 12) + 12) % 12
+        var octave = Math.floor(pitch / 12) - 1
+        return names[pc] + octave
     }
 
     function scanScore() {
@@ -294,7 +294,10 @@ MuseScore {
                             tick: tick,
                             fraction: cursor.element.fraction,
                             pitch: note.pitch,
+                            name: noteName(note),
                             noteIndex: noteIndexInChord,
+                            chordNoteIndex: noteIndexInChord,
+                            chordNoteCount: cursor.element.notes.length,
                             samePitchIndex: samePitchIndex,
                             note: note
                         })
@@ -311,52 +314,58 @@ MuseScore {
                 + " score=" + curScore.filePath)
     }
 
+    function clearMarker() {
+        if (!markerElement) {
+            return
+        }
+        try {
+            curScore.startCmd("GrandOMR clear marker")
+            removeElement(markerElement)
+            curScore.endCmd()
+        } catch (error) {
+            try {
+                curScore.endCmd()
+            } catch (ignored) {
+            }
+            log("Clear marker failed: " + error)
+        }
+        markerElement = null
+    }
+
+    function placeMarker(note) {
+        if (!showMarker || !note) {
+            return
+        }
+        try {
+            if (markerElement) {
+                removeElement(markerElement)
+                markerElement = null
+            }
+            var marker = newElement(Element.TEXT)
+            marker.text = "◆"
+            marker.color = "#ff2f00"
+            marker.fontSize = 16
+            marker.offsetX = -0.4
+            marker.offsetY = -2.2
+            note.add(marker)
+            markerElement = marker
+        } catch (error) {
+            markerElement = null
+            log("Place marker failed: " + error)
+        }
+    }
+
     function findScannedNote(selector) {
         if (noteIndex.length === 0) {
             scanScore()
         }
 
-        var wantStaff = fieldValue(selector, "staffIdx", 0)
-        var wantVoice = fieldValue(selector, "voiceIdx", 0)
-        var wantMeasure = fieldValue(selector, "measureIdx", 0)
-        var wantBeat = fieldValue(selector, "beat", 0)
-        var wantNoteIndex = fieldValue(selector, "noteIndex", undefined)
-        var fallbackSameBeat = null
-        var fallbackNearestBeat = null
-        var fallbackNearestDist = 999999
-
-        for (var i = 0; i < noteIndex.length; i++) {
-            var item = noteIndex[i]
-            if (item.staffIdx !== wantStaff) {
-                continue
+        if (selector.scoreNoteIndex !== undefined) {
+            var scanIdx = Number(selector.scoreNoteIndex)
+            if (!isNaN(scanIdx) && scanIdx >= 0 && scanIdx < noteIndex.length) {
+                return noteIndex[scanIdx]
             }
-            if (item.measureIdx !== wantMeasure) {
-                continue
-            }
-            if (selector.pitch !== undefined && item.pitch !== selector.pitch) {
-                continue
-            }
-            if (item.voiceIdx === wantVoice
-                    && closeEnough(item.beat, wantBeat)
-                    && (wantNoteIndex === undefined || item.samePitchIndex === wantNoteIndex)) {
-                return item
-            }
-            if (fallbackSameBeat === null && closeEnough(item.beat, wantBeat)) {
-                fallbackSameBeat = item
-            }
-            var beatDist = Math.abs(item.beat - wantBeat)
-            if (beatDist < fallbackNearestDist) {
-                fallbackNearestDist = beatDist
-                fallbackNearestBeat = item
-            }
-        }
-        if (fallbackSameBeat !== null) {
-            log("Fallback matched same beat; voice/noteIndex differed")
-            return fallbackSameBeat
-        }
-        if (fallbackNearestBeat !== null && fallbackNearestDist <= 0.25) {
-            log("Fallback matched nearest beat; delta=" + fallbackNearestDist)
-            return fallbackNearestBeat
+            return null
         }
 
         return null
@@ -367,92 +376,18 @@ MuseScore {
             scanScore()
         }
 
-        var wantStaff = fieldValue(selector, "staffIdx", 0)
-        var wantVoice = fieldValue(selector, "voiceIdx", 0)
-        var wantMeasure = fieldValue(selector, "measureIdx", 0)
-        var wantBeat = fieldValue(selector, "beat", 0)
-        var wantNoteIndex = fieldValue(selector, "noteIndex", undefined)
-
-        for (var i = 0; i < noteIndex.length; i++) {
-            var item = noteIndex[i]
-            if (item.staffIdx !== wantStaff || item.voiceIdx !== wantVoice) {
-                continue
-            }
-            if (item.measureIdx !== wantMeasure || !closeEnough(item.beat, wantBeat)) {
-                continue
-            }
-            if (selector.pitch !== undefined && item.pitch !== selector.pitch) {
-                continue
-            }
-            if (wantNoteIndex !== undefined && item.samePitchIndex !== wantNoteIndex) {
-                continue
-            }
-            return item
-        }
-        return null
+        return findScannedNote(selector)
     }
 
     function describeCandidates(selector) {
-        var wantStaff = fieldValue(selector, "staffIdx", 0)
-        var wantMeasure = fieldValue(selector, "measureIdx", 0)
-        var wantPitch = selector.pitch
-        var rows = []
-        for (var i = 0; i < noteIndex.length; i++) {
-            var item = noteIndex[i]
-            if (item.staffIdx !== wantStaff) {
-                continue
+        if (selector.scoreNoteIndex !== undefined) {
+            var scanIdx = Number(selector.scoreNoteIndex)
+            if (isNaN(scanIdx)) {
+                return "invalid scoreNoteIndex=" + selector.scoreNoteIndex
             }
-            if (item.measureIdx !== wantMeasure) {
-                continue
-            }
-            if (wantPitch !== undefined && item.pitch !== wantPitch) {
-                continue
-            }
-            rows.push("m=" + item.measureIdx + " b=" + item.beat
-                    + " v=" + item.voiceIdx + " p=" + item.pitch
-                    + " ni=" + item.samePitchIndex)
-            if (rows.length >= 8) {
-                break
-            }
+            return "scoreNoteIndex=" + scanIdx + " scannedNotes=" + noteIndex.length
         }
-        if (rows.length === 0) {
-            var sameStaffPitch = []
-            var sameMeasure = []
-            var sameStaff = []
-            for (var j = 0; j < noteIndex.length; j++) {
-                var cand = noteIndex[j]
-                if (cand.staffIdx === wantStaff && cand.pitch === Number(wantPitch)) {
-                    sameStaffPitch.push("m=" + cand.measureIdx + " b=" + cand.beat
-                            + " v=" + cand.voiceIdx + " p=" + cand.pitch
-                            + " ni=" + cand.samePitchIndex)
-                    if (sameStaffPitch.length >= 8) {
-                        break
-                    }
-                }
-            }
-            for (var k = 0; k < noteIndex.length && sameMeasure.length < 8; k++) {
-                var mCand = noteIndex[k]
-                if (mCand.staffIdx === wantStaff && mCand.measureIdx === wantMeasure) {
-                    sameMeasure.push("m=" + mCand.measureIdx + " b=" + mCand.beat
-                            + " v=" + mCand.voiceIdx + " p=" + mCand.pitch
-                            + " ni=" + mCand.samePitchIndex)
-                }
-            }
-            for (var s = 0; s < noteIndex.length && sameStaff.length < 8; s++) {
-                var sCand = noteIndex[s]
-                if (sCand.staffIdx === wantStaff) {
-                    sameStaff.push("m=" + sCand.measureIdx + " b=" + sCand.beat
-                            + " v=" + sCand.voiceIdx + " p=" + sCand.pitch
-                            + " ni=" + sCand.samePitchIndex)
-                }
-            }
-            return "no exact candidates on staff=" + wantStaff + " measure=" + wantMeasure
-                    + " pitch=" + wantPitch
-                    + " | same staff+pitch: " + (sameStaffPitch.length ? sameStaffPitch.join(" | ") : "<none>")
-                    + " | same staff+measure: " + (sameMeasure.length ? sameMeasure.join(" | ") : "<none>")
-                    + " | first same staff: " + (sameStaff.length ? sameStaff.join(" | ") : "<none>")
-        }
-        return rows.join(" | ")
+        return "selector has no scoreNoteIndex"
     }
 
     function focusMatchedLocation(match) {
@@ -500,6 +435,12 @@ MuseScore {
 
         curScore.startCmd("GrandOMR select note")
         curScore.selection.clear()
+        if (showMarker) {
+            placeMarker(match.note)
+        } else if (markerElement) {
+            removeElement(markerElement)
+            markerElement = null
+        }
         curScore.selection.select(match.note, false)
         curScore.endCmd()
         focusMatchedLocation(match)
@@ -508,8 +449,8 @@ MuseScore {
         curScore.selection.select(match.note, false)
         curScore.endCmd()
         var okMsg = "Selected seq=" + sequence
-                + " m=" + match.measureIdx
-                + " b=" + match.beat
+                + " index=" + match.scanIndex
+                + " name=" + match.name
                 + " pitch=" + match.pitch
         log(okMsg)
         sendAck(sequence, true, okMsg)
