@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from pdf2image import convert_from_path
-from pipeline import run_pipeline, merge_pages
+from pipeline import run_pipeline, merge_pages, write_plugin_output
 
 
 def main():
@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--dpi", type=int, default=300, help="PDF rendering DPI (default: 300)")
     parser.add_argument("--no-gpu", action="store_true", help="Disable GPU inference")
     parser.add_argument("--no-vlm", action="store_true", help="Disable VLM instrument detection")
+    parser.add_argument("--plugin-output", default=None,
+                        help="Write GrandOMR plugin bundle to this directory")
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -62,14 +64,25 @@ def main():
 
     # 2. Per-page recognition with cross-page name propagation
     page_xmls = []
+    plugin_pages = []
     detected_names = None
-    for png_path in png_paths:
+    for page_idx, png_path in enumerate(png_paths):
         xml_path = png_path.replace(".png", ".musicxml")
-        _, names = run_pipeline(
-            png_path, xml_path,
-            use_gpu=use_gpu, use_vlm=use_vlm,
-            part_names_override=detected_names,
-        )
+        if args.plugin_output:
+            _, names, page_plugin_pages, _xml_string = run_pipeline(
+                png_path, xml_path,
+                use_gpu=use_gpu, use_vlm=use_vlm,
+                part_names_override=detected_names,
+                collect_plugin_data=True,
+                page_index=page_idx,
+            )
+            plugin_pages.extend(page_plugin_pages)
+        else:
+            _, names = run_pipeline(
+                png_path, xml_path,
+                use_gpu=use_gpu, use_vlm=use_vlm,
+                part_names_override=detected_names,
+            )
         if detected_names is None and names:
             detected_names = names
         page_xmls.append(xml_path)
@@ -80,6 +93,15 @@ def main():
     else:
         import shutil
         shutil.copy2(page_xmls[0], out_path)
+
+    if args.plugin_output:
+        final_xml = Path(out_path).read_text(encoding="utf-8")
+        write_plugin_output(
+            args.plugin_output,
+            musicxml_path=out_path,
+            xml_string=final_xml,
+            plugin_pages=plugin_pages,
+        )
 
     elapsed = time.time() - t_total
     print(f"\n{'='*60}")

@@ -14,7 +14,10 @@ import sys
 import argparse
 import re
 import time
+import json
+import shutil
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
@@ -137,6 +140,28 @@ DEFAULT_TRANSPOSE_KEY = {
 }
 
 
+@dataclass
+class PluginTokenNote:
+    page_index: int
+    part_idx: int
+    staff_idx: int
+    token_index: int
+    token_x: float
+    token_y: float | None
+    pitch: int | None
+    homr_bbox: list[float]
+    homr_center: list[float]
+    homr_debug_id: int | None = None
+
+
+@dataclass
+class PluginPageData:
+    image_path: str
+    image_width: int
+    image_height: int
+    notes: list[PluginTokenNote]
+
+
 def _compute_transpose(base: str, key: str):
     """Compute (diatonic, chromatic, octave_change) purely from key letter.
     Direction: Horn/English Horn always down; others nearest to unison."""
@@ -210,6 +235,509 @@ def _extract_part_pitches(xml_string: str) -> List[List[int]]:
             midis.append(midi)
         result.append(midis)
     return result
+
+
+def _midi_from_pitch_element(pitch_el) -> int | None:
+    if pitch_el is None:
+        return None
+    step = pitch_el.find("step")
+    octave = pitch_el.find("octave")
+    alter = pitch_el.find("alter")
+    if step is None or octave is None:
+        return None
+    try:
+        midi = (int(octave.text) + 1) * 12 + _STEP_TO_MIDI.get(step.text, 0)
+        if alter is not None:
+            midi += int(float(alter.text))
+        return midi
+    except (TypeError, ValueError):
+        return None
+
+
+def _pitch_name_to_midi(pitch: str) -> int | None:
+    if not pitch or pitch in ("_", "PAD"):
+        return None
+    match = re.match(r"^([A-G])(-?\d+)$", pitch)
+    if not match:
+        return None
+    return (int(match.group(2)) + 1) * 12 + _STEP_TO_MIDI[match.group(1)]
+
+
+def _note_bbox_from_box(box, x_scale: float, y_scale: float) -> list[float]:
+    x1 = min(box.top_left[0], box.bottom_left[0], box.top_right[0], box.bottom_right[0])
+    x2 = max(box.top_left[0], box.bottom_left[0], box.top_right[0], box.bottom_right[0])
+    y1 = min(box.top_left[1], box.bottom_left[1], box.top_right[1], box.bottom_right[1])
+    y2 = max(box.top_left[1], box.bottom_left[1], box.top_right[1], box.bottom_right[1])
+    return [
+        round(float(x1) * x_scale, 2),
+        round(float(y1) * y_scale, 2),
+        round(float(x2) * x_scale, 2),
+        round(float(y2) * y_scale, 2),
+    ]
+
+
+def _match_staff_token_notes_to_noteheads(
+    symbols,
+    staff,
+    part_idx: int,
+    page_index: int,
+    image_width: int,
+    image_height: int,
+    homr_width: int,
+    homr_height: int,
+) -> list[PluginTokenNote]:
+    import math
+
+    unit = staff.average_unit_size
+    region_x_min = staff.min_x - 2 * unit
+    region_x_max = staff.max_x + 2 * unit
+    region_w = region_x_max - region_x_min
+    if region_w <= 0:
+        return []
+
+    canvas_w = 1280.0
+    scale = canvas_w / region_w
+    x_scale = image_width / homr_width
+    y_scale = image_height / homr_height
+    staff_notes = sorted(staff.get_notes(), key=lambda n: (n.center[0], n.center[1]))
+    result = []
+    used_note_ids = set()
+
+    for token_index, sym in enumerate(symbols):
+        if not sym.rhythm.startswith("note_"):
+            continue
+        if sym.coordinates is None:
+            continue
+        if math.isnan(sym.coordinates[0]):
+            continue
+        canvas_x = float(sym.coordinates[0])
+        best_note = None
+        best_dist = float("inf")
+        for note in staff_notes:
+            if id(note) in used_note_ids:
+                continue
+            note_canvas_x = (note.center[0] - region_x_min) * scale
+            dist = abs(note_canvas_x - canvas_x)
+            if dist < best_dist:
+                best_dist = dist
+                best_note = note
+        if best_note is None:
+            continue
+
+        # Keep the tolerance loose. trOMR attention x is approximate and is used
+        # only to attach the nearest HOMR notehead bbox to the logical token.
+        if best_dist > 90.0:
+            continue
+        used_note_ids.add(id(best_note))
+        center = [
+            round(float(best_note.center[0]) * x_scale, 2),
+            round(float(best_note.center[1]) * y_scale, 2),
+        ]
+        token_y = None
+        if len(sym.coordinates) > 1 and not math.isnan(sym.coordinates[1]):
+            token_y = float(sym.coordinates[1])
+        result.append(
+            PluginTokenNote(
+                page_index=page_index,
+                part_idx=part_idx,
+                staff_idx=part_idx,
+                token_index=token_index,
+                token_x=canvas_x,
+                token_y=token_y,
+                pitch=_pitch_name_to_midi(sym.pitch),
+                homr_bbox=_note_bbox_from_box(best_note.box, x_scale, y_scale),
+                homr_center=center,
+                homr_debug_id=getattr(best_note.box, "debug_id", None),
+            )
+        )
+
+    return result
+
+
+def _build_plugin_page_data(
+    img_path: str,
+    page_index: int,
+    result_staffs,
+    staffs_sorted,
+    predictions_original_shape,
+) -> PluginPageData:
+    image = cv2.imread(img_path)
+    if image is None:
+        raise RuntimeError(f"Cannot read source image for plugin output: {img_path}")
+    image_height, image_width = image.shape[:2]
+    homr_height, homr_width = predictions_original_shape[:2]
+    notes = []
+    for part_idx, symbols in enumerate(result_staffs):
+        if part_idx >= len(staffs_sorted):
+            continue
+        notes.extend(
+            _match_staff_token_notes_to_noteheads(
+                symbols,
+                staffs_sorted[part_idx],
+                part_idx=part_idx,
+                page_index=page_index,
+                image_width=image_width,
+                image_height=image_height,
+                homr_width=homr_width,
+                homr_height=homr_height,
+            )
+        )
+    return PluginPageData(
+        image_path=str(img_path),
+        image_width=image_width,
+        image_height=image_height,
+        notes=notes,
+    )
+
+
+def _build_plugin_page_image_only(img_path: str, page_index: int) -> PluginPageData:
+    image = cv2.imread(img_path)
+    if image is None:
+        raise RuntimeError(f"Cannot read source image for plugin output: {img_path}")
+    image_height, image_width = image.shape[:2]
+    return PluginPageData(
+        image_path=str(img_path),
+        image_width=image_width,
+        image_height=image_height,
+        notes=[],
+    )
+
+
+def _xml_note_records(root: ET.Element):
+    records = []
+    part_staff_offsets = {}
+    next_staff_idx = 0
+    for part_idx, part in enumerate(root.findall("part")):
+        measures = part.findall("measure")
+        max_staff = 1
+        for measure in measures:
+            for note in measure.findall("note"):
+                try:
+                    staff_num = int(note.findtext("staff", "1"))
+                except ValueError:
+                    staff_num = 1
+                max_staff = max(max_staff, staff_num)
+        part_staff_offsets[part_idx] = next_staff_idx
+        next_staff_idx += max_staff
+
+        divisions = 1
+        for measure_idx, measure in enumerate(measures):
+            attrs = measure.find("attributes")
+            if attrs is not None:
+                d_text = attrs.findtext("divisions")
+                if d_text:
+                    try:
+                        divisions = int(d_text)
+                    except ValueError:
+                        pass
+            current_time = 0
+            last_note_start = 0
+            same_pitch_index = {}
+            for child in measure:
+                if child.tag == "backup":
+                    duration = int(child.findtext("duration", "0") or "0")
+                    current_time = max(0, current_time - duration)
+                    continue
+                if child.tag == "forward":
+                    duration = int(child.findtext("duration", "0") or "0")
+                    current_time += duration
+                    continue
+                if child.tag != "note":
+                    continue
+
+                voice_text = child.findtext("voice", "1")
+                try:
+                    xml_voice = int(voice_text)
+                except ValueError:
+                    xml_voice = 1
+                try:
+                    staff_num = int(child.findtext("staff", "1"))
+                except ValueError:
+                    staff_num = 1
+                local_voice = ((xml_voice - 1) % 4) + 1
+                duration = int(child.findtext("duration", "0") or "0")
+                is_chord = child.find("chord") is not None
+                start = last_note_start if is_chord else current_time
+
+                pitch = _midi_from_pitch_element(child.find("pitch"))
+                if pitch is not None:
+                    staff_idx = part_staff_offsets[part_idx] + staff_num - 1
+                    voice_idx = local_voice - 1
+                    same_key = (staff_idx, voice_idx, measure_idx, start, pitch)
+                    note_index_same_pitch = same_pitch_index.get(same_key, 0)
+                    same_pitch_index[same_key] = note_index_same_pitch + 1
+                    beat = start / divisions if divisions else 0.0
+                    records.append({
+                        "element": child,
+                        "partIdx": part_idx,
+                        "staffIdx": staff_idx,
+                        "voiceIdx": voice_idx,
+                        "measureIdx": measure_idx,
+                        "beat": float(beat),
+                        "pitch": pitch,
+                        "noteIndex": note_index_same_pitch,
+                    })
+
+                if not is_chord:
+                    last_note_start = start
+                    current_time += duration
+    return records
+
+
+def _group_token_notes_by_chord(token_notes: list[PluginTokenNote]) -> dict[int, list[list[PluginTokenNote]]]:
+    groups_by_part: dict[int, list[list[PluginTokenNote]]] = {}
+    for note in sorted(token_notes, key=lambda n: (n.part_idx, n.page_index, n.staff_idx, n.token_index, n.homr_center[0], n.homr_center[1])):
+        groups = groups_by_part.setdefault(note.part_idx, [])
+        if groups:
+            prev = groups[-1]
+            prev_x = sum(item.homr_center[0] for item in prev) / len(prev)
+            prev_token_x = sum(item.token_x for item in prev) / len(prev)
+            same_chord = (
+                note.page_index == prev[-1].page_index
+                and note.staff_idx == prev[-1].staff_idx
+                and abs(note.homr_center[0] - prev_x) <= 30.0
+                and abs(note.token_x - prev_token_x) <= 25.0
+            )
+            if same_chord:
+                prev.append(note)
+                continue
+        groups.append([note])
+    for groups in groups_by_part.values():
+        for group in groups:
+            group.sort(key=lambda n: (n.pitch is None, n.pitch if n.pitch is not None else 999, n.homr_center[1]))
+    return groups_by_part
+
+
+def _group_xml_records_by_chord(records: list[dict]) -> dict[int, list[list[dict]]]:
+    groups_by_part: dict[int, list[list[dict]]] = {}
+    for rec in records:
+        groups = groups_by_part.setdefault(rec["partIdx"], [])
+        key = (rec["staffIdx"], rec["voiceIdx"], rec["measureIdx"], rec["beat"])
+        if not groups or groups[-1][0].get("_groupKey") != key:
+            rec["_groupKey"] = key
+            groups.append([rec])
+        else:
+            rec["_groupKey"] = key
+            groups[-1].append(rec)
+    return groups_by_part
+
+
+def _match_group_notes_to_records(token_group: list[PluginTokenNote], xml_group: list[dict]) -> dict[int, PluginTokenNote]:
+    matches: dict[int, PluginTokenNote] = {}
+    available = list(token_group)
+    for rec in xml_group:
+        best_idx = None
+        best_score = float("inf")
+        for idx, token in enumerate(available):
+            if token.pitch is not None and token.pitch == rec["pitch"]:
+                score = 0
+            elif token.pitch is not None:
+                score = 100 + abs(token.pitch - rec["pitch"])
+            else:
+                score = 200 + idx
+            if score < best_score:
+                best_score = score
+                best_idx = idx
+        if best_idx is None:
+            continue
+        matches[id(rec)] = available.pop(best_idx)
+    return matches
+
+
+def _match_token_notes_to_xml_records(token_notes: list[PluginTokenNote], records: list[dict]) -> dict[int, PluginTokenNote]:
+    """Bind bbox-bearing trOMR note tokens to XML notes in local reading order.
+
+    Pitch is useful inside one visual chord, but it must not drive matching across
+    the whole staff: repeated orchestral patterns make that easy to shift by
+    several measures. Chord groups keep the binding local in x/order space.
+    """
+    token_groups_by_part = _group_token_notes_by_chord(token_notes)
+    xml_groups_by_part = _group_xml_records_by_chord(records)
+    matches: dict[int, PluginTokenNote] = {}
+    for part_idx, xml_groups in xml_groups_by_part.items():
+        token_groups = token_groups_by_part.get(part_idx, [])
+        for group_idx, xml_group in enumerate(xml_groups):
+            if group_idx >= len(token_groups):
+                break
+            matches.update(_match_group_notes_to_records(token_groups[group_idx], xml_group))
+    return matches
+
+
+def _attach_note_ids_and_build_selectors(xml_string: str, plugin_pages: list[PluginPageData]):
+    root = ET.fromstring(xml_string)
+    records = _xml_note_records(root)
+    token_notes = [note for page in plugin_pages for note in page.notes]
+    matches = _match_token_notes_to_xml_records(token_notes, records)
+    plugin_notes = []
+    for xml_idx, rec in enumerate(records):
+        note_id = f"grandomr-n{xml_idx + 1:06d}"
+        rec["element"].set("id", note_id)
+        matched = matches.get(id(rec))
+        if matched is None:
+            continue
+        plugin_notes.append({
+            "omrId": note_id,
+            "pageIndex": matched.page_index,
+            "bbox": matched.homr_bbox,
+            "center": matched.homr_center,
+            "selector": {
+                "partIdx": rec["partIdx"],
+                "staffIdx": rec["staffIdx"],
+                "voiceIdx": rec["voiceIdx"],
+                "measureIdx": rec["measureIdx"],
+                "beat": rec["beat"],
+                "pitch": rec["pitch"],
+                "noteIndex": rec["noteIndex"],
+            },
+            "musicXmlNoteIndex": xml_idx,
+            "debug": {
+                "homrDebugId": matched.homr_debug_id,
+                "tromrTokenIndex": matched.token_index,
+                "tromrTokenX": matched.token_x,
+                "tromrTokenY": matched.token_y,
+            },
+        })
+
+    xml_with_ids = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    return xml_with_ids, plugin_notes
+
+
+def _prebind_plugin_notes(xml_string: str, plugin_pages: list[PluginPageData], id_prefix: str):
+    """Attach stable ids to a page/system XML and bind available bbox data by note order.
+
+    The returned XML keeps those ids through merge_pages because merge uses a deep copy.
+    Final selectors are computed later from the merged XML by id.
+    """
+    root = ET.fromstring(xml_string)
+    records = _xml_note_records(root)
+    token_notes = [note for page in plugin_pages for note in page.notes]
+    matches = _match_token_notes_to_xml_records(token_notes, records)
+    plugin_notes = []
+    for xml_idx, rec in enumerate(records):
+        note_id = f"{id_prefix}-n{xml_idx + 1:06d}"
+        rec["element"].set("id", note_id)
+        matched = matches.get(id(rec))
+        if matched is None:
+            continue
+        plugin_notes.append({
+            "omrId": note_id,
+            "pageIndex": matched.page_index,
+            "bbox": matched.homr_bbox,
+            "center": matched.homr_center,
+            "musicXmlNoteIndex": xml_idx,
+            "debug": {
+                "homrDebugId": matched.homr_debug_id,
+                "tromrTokenIndex": matched.token_index,
+                "tromrTokenX": matched.token_x,
+                "tromrTokenY": matched.token_y,
+                "prebindPartIdx": rec["partIdx"],
+                "prebindPitch": rec["pitch"],
+                "tokenPitch": matched.pitch,
+                "pitchMismatch": matched.pitch != rec["pitch"],
+            },
+        })
+    xml_with_ids = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    return xml_with_ids, plugin_notes
+
+
+def _selectors_by_note_id(xml_string: str) -> dict[str, dict]:
+    root = ET.fromstring(xml_string)
+    selectors = {}
+    for rec in _xml_note_records(root):
+        note_id = rec["element"].get("id")
+        if not note_id:
+            continue
+        selectors[note_id] = {
+            "partIdx": rec["partIdx"],
+            "staffIdx": rec["staffIdx"],
+            "voiceIdx": rec["voiceIdx"],
+            "measureIdx": rec["measureIdx"],
+            "beat": rec["beat"],
+            "pitch": rec["pitch"],
+            "noteIndex": rec["noteIndex"],
+        }
+    return selectors
+
+
+def _finalize_prebound_plugin_notes(xml_string: str, plugin_pages: list[PluginPageData]):
+    selectors = _selectors_by_note_id(xml_string)
+    notes = []
+    musicxml_index_by_id = {
+        rec["element"].get("id"): idx
+        for idx, rec in enumerate(_xml_note_records(ET.fromstring(xml_string)))
+        if rec["element"].get("id")
+    }
+    seen = set()
+    for page in plugin_pages:
+        for note in page.notes:
+            if not isinstance(note, dict):
+                continue
+            omr_id = note.get("omrId")
+            selector = selectors.get(omr_id)
+            if not omr_id or selector is None or omr_id in seen:
+                continue
+            seen.add(omr_id)
+            item = dict(note)
+            item["selector"] = selector
+            item["musicXmlNoteIndex"] = musicxml_index_by_id.get(omr_id, item.get("musicXmlNoteIndex"))
+            notes.append(item)
+    xml_with_ids = ET.tostring(ET.fromstring(xml_string), encoding="unicode", xml_declaration=True)
+    return xml_with_ids, notes
+
+
+def write_plugin_output(
+    plugin_output: str,
+    musicxml_path: str,
+    xml_string: str,
+    plugin_pages: list[PluginPageData],
+) -> str:
+    out_dir = Path(plugin_output)
+    pages_dir = out_dir / "pages"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+
+    has_prebound = any(
+        isinstance(note, dict)
+        for page in plugin_pages
+        for note in page.notes
+    )
+    if has_prebound:
+        xml_with_ids, notes = _finalize_prebound_plugin_notes(xml_string, plugin_pages)
+    else:
+        xml_with_ids, notes = _attach_note_ids_and_build_selectors(xml_string, plugin_pages)
+    score_path = out_dir / "score.musicxml"
+    score_path.write_text(xml_with_ids, encoding="utf-8")
+    Path(musicxml_path).write_text(xml_with_ids, encoding="utf-8")
+
+    page_entries = []
+    for page_idx, page in enumerate(plugin_pages):
+        page_name = f"page_{page_idx + 1:04d}{Path(page.image_path).suffix.lower() or '.png'}"
+        target = pages_dir / page_name
+        shutil.copy2(page.image_path, target)
+        page_entries.append({
+            "pageIndex": page_idx,
+            "imagePath": str(Path("pages") / page_name).replace("\\", "/"),
+            "width": page.image_width,
+            "height": page.image_height,
+        })
+
+    manifest = {
+        "schemaVersion": 1,
+        "musicxmlPath": "score.musicxml",
+        "sourceMusicxmlPath": str(Path(musicxml_path).resolve()),
+        "pages": page_entries,
+        "notesPath": "notes.json",
+    }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / "notes.json").write_text(
+        json.dumps({"schemaVersion": 1, "notes": notes}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[Plugin] Written plugin output: {out_dir}")
+    return str(score_path)
 
 
 def _match_override_to_detected(override: List[str], detected: List[str],
@@ -1770,7 +2298,9 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
 
 def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                       tremolo_templates: str = None,
-                      part_names_override: List[str] = None) -> List[Tuple[str, List[str]]]:
+                      part_names_override: List[str] = None,
+                      collect_plugin_data: bool = False,
+                      page_index: int = 0):
     """
     Run HOMR's complete pipeline with automatic system grouping override
     for orchestral scores. Returns list of (MusicXML string, part names) tuples.
@@ -1959,8 +2489,33 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                 xml_string = _inject_dynamics(xml_string, sys_dynamics)
                 print(f"[Dynamics] System {sys_idx + 1}: {len(sys_dynamics)} marking(s)")
 
-            results.append((xml_string, sys_names))
+            plugin_page = None
+            if collect_plugin_data:
+                plugin_page = _build_plugin_page_data(
+                    img_path=img_path,
+                    page_index=page_index,
+                    result_staffs=sys_result,
+                    staffs_sorted=sys_staves,
+                    predictions_original_shape=predictions.original.shape,
+                )
+                id_prefix = f"grandomr-p{page_index + 1:04d}s{sys_idx + 1:03d}"
+                xml_string, prebound_notes = _prebind_plugin_notes(
+                    xml_string,
+                    [plugin_page],
+                    id_prefix=id_prefix,
+                )
+                plugin_page.notes = prebound_notes
+                print(f"[Plugin] System {sys_idx + 1}: mapped {len(prebound_notes)} note box(es)")
 
+            results.append((xml_string, sys_names, plugin_page))
+
+        if collect_plugin_data:
+            if not any(plugin_page is not None for _xml, _names, plugin_page in results):
+                plugin_page = _build_plugin_page_image_only(img_path, page_index)
+                print("[Plugin] Multi-system page detected; no note bbox mapping was produced")
+                if results:
+                    xml_string, sys_names, _ = results[0]
+                    results[0] = (xml_string, sys_names, plugin_page)
         return results
 
     # ── Normal path: uniform system sizes ──
@@ -2038,7 +2593,18 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
         xml_string = _inject_dynamics(xml_string, dynamics)
         print(f"[Dynamics] Injected {len(dynamics)} marking(s) ({time.time() - t_dyn:.1f}s)")
 
-    return [(xml_string, part_names)]
+    plugin_page = None
+    if collect_plugin_data:
+        plugin_page = _build_plugin_page_data(
+            img_path=img_path,
+            page_index=page_index,
+            result_staffs=result_staffs,
+            staffs_sorted=staffs_sorted,
+            predictions_original_shape=predictions.original.shape,
+        )
+        print(f"[Plugin] Mapped {len(plugin_page.notes)} token note(s) to HOMR notehead boxes")
+
+    return [(xml_string, part_names, plugin_page)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3931,7 +4497,9 @@ def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm: bool = True,
-                 tremolo_templates: str = None, part_names_override: List[str] = None):
+                 tremolo_templates: str = None, part_names_override: List[str] = None,
+                 plugin_output: str = None, collect_plugin_data: bool = False,
+                 page_index: int = 0):
     """Full pipeline: image → MusicXML.
     Returns (output_path, part_names) — part_names is the detected/applied instrument list,
     useful for passing as override to subsequent pages."""
@@ -3944,14 +4512,18 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
         img_path, use_gpu=use_gpu, use_vlm=use_vlm,
         tremolo_templates=tremolo_templates,
         part_names_override=part_names_override,
+        collect_plugin_data=collect_plugin_data or plugin_output is not None,
+        page_index=page_index,
     )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     final_names = None
+    plugin_pages = []
+    final_xml_string = None
 
     if len(results) == 1:
-        xml_string, part_names = results[0]
+        xml_string, part_names, plugin_page = results[0]
         if not part_names and part_names_override is not None:
             part_names = list(part_names_override)
             print(f"[Override] No labels on this page, reusing: {len(part_names)} instruments")
@@ -3962,6 +4534,9 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
                 part_names = _match_override_to_detected(part_names_override, part_names, xml_string)
         xml_string = _inject_part_names(xml_string, part_names)
         xml_string = _cross_part_post_process(xml_string)
+        final_xml_string = xml_string
+        if plugin_page is not None:
+            plugin_pages.append(plugin_page)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(xml_string)
         final_names = part_names
@@ -3969,7 +4544,7 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
         import tempfile
         temp_files = []
         system_master_names = None
-        for sys_idx, (xml_string, sys_names) in enumerate(results):
+        for sys_idx, (xml_string, sys_names, plugin_page) in enumerate(results):
             if sys_idx == 0:
                 final_names = sys_names
                 system_master_names = list(part_names_override or sys_names or [])
@@ -3990,11 +4565,28 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
             with open(sys_path, "w", encoding="utf-8") as f:
                 f.write(xml_string)
             temp_files.append(sys_path)
+            if plugin_page is not None:
+                if plugin_pages:
+                    plugin_pages[0].notes.extend(plugin_page.notes)
+                else:
+                    plugin_pages.append(plugin_page)
             print(f"[MultiSys] System {sys_idx + 1}: {sys_path}")
         merge_pages(temp_files, output_path)
+        final_xml_string = Path(output_path).read_text(encoding="utf-8")
+
+    if plugin_output is not None and final_xml_string is not None:
+        plugin_xml_path = write_plugin_output(
+            plugin_output,
+            musicxml_path=output_path,
+            xml_string=final_xml_string,
+            plugin_pages=plugin_pages,
+        )
+        print(f"[Plugin] score.musicxml: {plugin_xml_path}")
 
     elapsed = time.time() - t_start
     print(f"\n[Done] {output_path} ({elapsed:.1f}s)")
+    if collect_plugin_data:
+        return output_path, final_names, plugin_pages, final_xml_string
     return output_path, final_names
 
 
@@ -4013,11 +4605,14 @@ def main():
                         help="Run quality check after processing (piano roll + issue report)")
     parser.add_argument("--tremolo-templates", default=None,
                         help="Directory with tremolo_tight_*.png templates for tremolo detection")
+    parser.add_argument("--plugin-output", default=None,
+                        help="Write GrandOMR plugin bundle to this directory")
     args = parser.parse_args()
 
     use_gpu = not args.no_gpu
     use_vlm = not args.no_vlm
     tremolo_tpl = args.tremolo_templates
+    plugin_output = args.plugin_output
 
     inputs = [Path(p) for p in args.input]
 
@@ -4026,6 +4621,8 @@ def main():
         out_dir = args.output or str(inputs[0] / "pipeline_output")
         os.makedirs(out_dir, exist_ok=True)
         detected_names = None
+        if plugin_output:
+            print("[Plugin] --plugin-output is ignored in directory batch mode")
         for img_file in sorted(inputs[0].glob("*.png")):
             out_path = os.path.join(out_dir, img_file.stem + ".musicxml")
             try:
@@ -4044,7 +4641,7 @@ def main():
     if len(inputs) == 1 and inputs[0].is_file():
         out = args.output or str(inputs[0].with_suffix(".musicxml"))
         run_pipeline(str(inputs[0]), out, use_gpu=use_gpu, use_vlm=use_vlm,
-                     tremolo_templates=tremolo_tpl)
+                     tremolo_templates=tremolo_tpl, plugin_output=plugin_output)
         if args.check:
             quality_check(out)
         return
@@ -4053,13 +4650,22 @@ def main():
     if len(inputs) > 1:
         page_xmls = []
         detected_names = None
-        for img_path in inputs:
+        all_plugin_pages = []
+        for page_idx, img_path in enumerate(inputs):
             if not img_path.is_file():
                 print(f"Error: {img_path} not found")
                 sys.exit(1)
             out = str(img_path.with_suffix(".musicxml"))
-            _, names = run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
-                         tremolo_templates=tremolo_tpl, part_names_override=detected_names)
+            if plugin_output:
+                _, names, plugin_pages, _xml_string = run_pipeline(
+                    str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                    tremolo_templates=tremolo_tpl, part_names_override=detected_names,
+                    collect_plugin_data=True, page_index=page_idx,
+                )
+                all_plugin_pages.extend(plugin_pages)
+            else:
+                _, names = run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                             tremolo_templates=tremolo_tpl, part_names_override=detected_names)
             if detected_names is None and names:
                 detected_names = names
             page_xmls.append(out)
@@ -4069,6 +4675,14 @@ def main():
             stem = inputs[0].parent / f"{inputs[0].stem}-{inputs[-1].stem}_merged.musicxml"
             merged_out = str(stem)
         merge_pages(page_xmls, merged_out)
+        if plugin_output:
+            final_xml = Path(merged_out).read_text(encoding="utf-8")
+            write_plugin_output(
+                plugin_output,
+                musicxml_path=merged_out,
+                xml_string=final_xml,
+                plugin_pages=all_plugin_pages,
+            )
         if args.check:
             quality_check(merged_out)
         return
