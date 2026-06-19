@@ -2907,8 +2907,11 @@ def _cross_part_post_process(xml_string: str) -> str:
         return xml_string
 
     parts = root.findall("part")
+    tremolo_n = _remove_invalid_two_note_tremolos(root)
+    if tremolo_n:
+        print(f"[PostProcess] Tremolo: removed {tremolo_n} invalid mark(s)")
     if len(parts) < 2:
-        return xml_string
+        return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
     fixes = []
 
@@ -3512,6 +3515,10 @@ def _cross_part_post_process(xml_string: str) -> str:
     # ── Fix E: type-duration alignment (final pass) ──
     fixes.extend(_fix_type_duration_alignment(root, label="E-"))
 
+    tremolo_n2 = _remove_invalid_two_note_tremolos(root)
+    if tremolo_n2:
+        fixes.append(f"Tremolo: removed {tremolo_n2} invalid mark(s)")
+
     if fixes:
         print(f"[PostProcess] {len(fixes)} fixes:")
         for f in fixes:
@@ -3520,6 +3527,130 @@ def _cross_part_post_process(xml_string: str) -> str:
         print("[PostProcess] No fixes needed")
 
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _remove_invalid_two_note_tremolos(root):
+    """Remove two-note tremolo pairs that cannot be rendered locally.
+
+    A measured two-note tremolo should connect two adjacent chord events in the
+    same part, measure, staff, and voice. Cross-measure pairs or pairs with
+    intervening rhythmic events create long beams in MuseScore and are usually
+    false positives from template matching.
+    """
+    removed = 0
+
+    def chord_event_key(note):
+        staff = note.findtext("staff", "1")
+        voice = note.findtext("voice", "1")
+        return staff, voice
+
+    def note_has_pitch(note):
+        return note.find("pitch") is not None
+
+    def event_key(event):
+        first = event[0]
+        return chord_event_key(first)
+
+    for part in root.findall("part"):
+        open_start = {}
+        for measure in part.findall("measure"):
+            events = []
+            current = []
+            for child in measure:
+                if child.tag != "note":
+                    continue
+                if child.find("chord") is None:
+                    if current:
+                        events.append(current)
+                    current = [child]
+                else:
+                    if current:
+                        current.append(child)
+                    else:
+                        current = [child]
+            if current:
+                events.append(current)
+
+            measure_starts = {}
+            measure_stops = {}
+            for idx, event in enumerate(events):
+                for note in event:
+                    trem = note.find("./notations/ornaments/tremolo")
+                    if trem is None:
+                        continue
+                    trem_type = trem.attrib.get("type")
+                    if trem_type == "start":
+                        measure_starts.setdefault(event_key(event), []).append((idx, note))
+                    elif trem_type == "stop":
+                        measure_stops.setdefault(event_key(event), []).append((idx, note))
+
+            valid_start_notes = set()
+            valid_stop_notes = set()
+            for key, starts in measure_starts.items():
+                stops = measure_stops.get(key, [])
+                used_stops = set()
+                for start_idx, start_note in starts:
+                    match = None
+                    for stop_pos, (stop_idx, stop_note) in enumerate(stops):
+                        if stop_pos in used_stops:
+                            continue
+                        if stop_idx <= start_idx:
+                            continue
+                        between = events[start_idx + 1:stop_idx]
+                        if any(any(note_has_pitch(n) or n.find("rest") is not None for n in ev) for ev in between):
+                            continue
+                        match = (stop_pos, stop_note)
+                        break
+                    if match is not None:
+                        used_stops.add(match[0])
+                        valid_start_notes.add(id(start_note))
+                        valid_stop_notes.add(id(match[1]))
+
+            # Any unmatched start from an earlier measure is invalid once a new
+            # measure begins; two-note tremolo must not cross measure boundaries.
+            for prev_note in open_start.values():
+                removed += _remove_tremolo_element(prev_note)
+            open_start = {}
+
+            for idx, event in enumerate(events):
+                for note in event:
+                    trem = note.find("./notations/ornaments/tremolo")
+                    if trem is None:
+                        continue
+                    trem_type = trem.attrib.get("type")
+                    if trem_type == "start":
+                        if id(note) not in valid_start_notes:
+                            open_start[chord_event_key(note)] = note
+                    elif trem_type == "stop":
+                        if id(note) not in valid_stop_notes:
+                            removed += _remove_tremolo_element(note)
+
+            for key, note in list(open_start.items()):
+                removed += _remove_tremolo_element(note)
+                del open_start[key]
+
+        for note in open_start.values():
+            removed += _remove_tremolo_element(note)
+
+    return removed
+
+
+def _remove_tremolo_element(note):
+    notations = note.find("notations")
+    if notations is None:
+        return 0
+    ornaments = notations.find("ornaments")
+    if ornaments is None:
+        return 0
+    tremolo = ornaments.find("tremolo")
+    if tremolo is None:
+        return 0
+    ornaments.remove(tremolo)
+    if len(ornaments) == 0:
+        notations.remove(ornaments)
+    if len(notations) == 0:
+        note.remove(notations)
+    return 1
 
 
 def _fix_voice_durations(root):
