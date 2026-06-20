@@ -16,8 +16,9 @@
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 1.5: 乐器名识别       │  VLM API (Qwen3-VL) 主路径
-│             移调信息          │  识别 "in A/Bb/F" 等移调标记
+│  Stage 1.5: 乐器名识别       │  VLM API (Qwen3-VL) 两阶段主路径
+│             移调信息          │    Pass 1: 逐谱表自由识别（附谱表坐标+OCR标签提示）
+│                             │    Pass 2: 按谱表数格式化为精确 N 行
 │                             │  RapidOCR + 缩写字典 备用路径
 └─────────────┬───────────────┘
               ▼
@@ -27,7 +28,7 @@
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 3: 跨声部后处理       │  Layer 0: 拍号推断（无拍号时从音符时值推算）
+│  Stage 3: 跨声部后处理       │  Layer 0: 拍号推断（显式标记优先，跨页传播）
 │                             │  Layer 1: 拍号/调号多数投票对齐
 │                             │  Layer 2: 小节数统一
 │                             │  Layer 3: 时值修正（position tracking）
@@ -35,8 +36,8 @@
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 4: 力度标记检测        │  RapidOCR 检测谱表下方力度文字
-│                             │  pp/p/mp/mf/f/ff/fff/sfz 等
+│  Stage 4: 力度标记检测        │  YOLOv8n 微调模型检测力度符号
+│                             │  f/p/s/hairpin 等 8 类
 │                             │  定位到小节，注入 <direction> 元素
 └─────────────┬───────────────┘
               ▼
@@ -47,9 +48,9 @@
 
 | 功能 | HOMR | 本项目 |
 |---|---|---|
-| 乐器识别 | 无（Part 1, Part 2...） | VLM API + RapidOCR 缩写字典 |
+| 乐器识别 | 无（Part 1, Part 2...） | 两阶段 VLM API + RapidOCR 缩写字典 |
 | 移调乐器 | 不支持 | 自动检测调性，注入 `<transpose>` 元素 |
-| 力度标记 | 不支持 | RapidOCR 检测 + 小节定位注入 |
+| 力度标记 | 不支持 | YOLOv8n 微调模型检测 + 小节定位注入 |
 | 谱表分组 | 几何检测（密集总谱易出错） | OCR 确定声部数 → 强制均分 |
 | 跨声部校正 | 无 | 多层后处理（拍号推断/对齐/结构/时值/溢出修复） |
 | 多页合并 | 不支持 | 乐器并集 + divisions 归一化 + 小节拼接 |
@@ -82,9 +83,13 @@
 └───────────────────┬───────────────────────────┘
                     ▼
 ┌───────────────────────────────────────────────┐
-│ 4. VLM 识别 (Qwen3-VL-235B)                     │
-│    输入: 第一 system 裁切图 + ocr_hint + 谱表数    │
-│    输出: ["Flute", "Clarinet:A", "Horn:F", ...]  │
+│ 4. 两阶段 VLM 识别 (Qwen3-VL-235B)               │
+│    Pass 1: 逐谱表自由推理                         │
+│      输入: 裁切图 + 谱表坐标提示 + 每谱表最近OCR标签 │
+│      输出: 每行 "Staff N (y=...): 乐器 — 理由"    │
+│    Pass 2: 严格格式化                             │
+│      输入: Pass 1 结果 + 裁切图 + 谱表坐标提示     │
+│      输出: 精确 N 行乐器名                         │
 │    验证: ≥50% 名字在 INSTRUMENT_MIDI 中           │
 │    失败 → RapidOCR 备用路径                       │
 └───────────────────┬───────────────────────────┘
@@ -93,11 +98,11 @@
 │ 5. 跨页传播 & Override 匹配                       │
 │    第一页结果 → detected_names                    │
 │    后续页 OCR 为空 → 直接复用 detected_names       │
-│    后续页谱表数不同 → 子序列匹配 + 音高验证         │
+│    override 数 > 当前检测数 → 子序列匹配（tacet）  │
 └───────────────────────────────────────────────┘
 ```
 
-### Stage 3: OCR 预扫描（OCR-gated VLM）
+### OCR 预扫描（OCR-gated VLM）
 
 `_ocr_margin_labels` 用 RapidOCR 扫描谱表左侧区域，提取文字标签并按 y 坐标排序。扫描范围限定在第一个 system 的 y 区间内，避免后续 system 的标签干扰。
 
@@ -108,7 +113,31 @@
 页面无标签 → OCR 返回空 → 跳过 VLM → 返回 [] → 由跨页传播机制复用第一页名字
 ```
 
-### Stage 4: VLM 乐器识别
+### 两阶段 VLM 乐器识别
+
+单次调用 VLM 并要求同时"识别乐器"和"输出精确 N 行"会相互干扰：VLM 倾向于把大括号内的多个谱表合并为一个条目，或者把"Oboen 1.2"展开为两行但依赖标签数字而非实际谱表数量，导致行数不符。**两阶段方法**将这两个目标解耦：
+
+**Pass 1 — 自由推理（无行数约束）**
+
+每个谱表的 y 坐标（全图坐标系）由 HOMR 精确测量，并附上距该 y 坐标最近的 OCR 标签，构成提示：
+
+```
+HOMR stave layout (17 staves, crop starts at full-image y=320):
+  Stave 1 (y=410): nearest label 'Fl.' (dist=12px)
+  Stave 2 (y=480): nearest label 'Ob.' (dist=8px)
+  ...
+  Stave 16 (y=1820): nearest label 'Vcll.' (dist=15px)
+  Stave 17 (y=1890): nearest label 'B.' (dist=11px)
+```
+
+Pass 1 要求 VLM 对每个谱表逐行给出 `Staff N (y=...): 乐器名 — 理由`，不限行数，允许自由推理。这一步解决了"一个标签对应几个谱表"的歧义：VLM 看到 Stave 16 和 Stave 17 的最近标签都是 `Vcll.`，就会把两者都识别为 Cello，而不会只识别一个。
+
+**Pass 2 — 严格格式化**
+
+以 Pass 1 的输出为上下文，加上谱表坐标提示，要求输出**精确 N 行**乐器名（无解释、无编号）。两行共用同一谱表时用 `Trombone/Tuba` 合并。关键规则写入 prompt：
+- `Name:Key` 格式，仅在乐谱上明确标注时才加 key（如 `Kl.(A)` → `Clarinet:A`）
+- `B` 作为 key 表示 B♭；`B.`/`Kb.` 作为乐器名表示 Contrabass
+- 德文缩写表：Fl./Ob./Kl./Fg./Hr./Trp./Pos./Pk. 等
 
 #### 名称与移调分离
 
@@ -124,12 +153,6 @@ VLM 返回 `Name:Key` 格式，将乐器名和移调调性分开：
 
 `_parse_instrument_key` 同时支持 `Name:Key`（VLM 格式）和 `Name in Key`（旧格式/显示格式）两种写法。
 
-#### VLM Prompt 设计要点
-
-1. **视觉谱表计数**：VLM 通过图像中实际的五线谱位置来分配乐器名，而不是根据标签上的数字（如 "Oboen 1.2"）展开。这解决了 "一个标签覆盖两个谱表" vs "一个标签旁只有一个谱表" 的歧义。
-2. **德文缩写表**：内置 Fl./Ob./Kl./Fg./Hr./Trp./Pos./Pk. 等德文缩写到标准名的映射。
-3. **Key 的德文规则**：`B` = B♭, `H` = B♮。
-
 ### 移调处理
 
 #### 计算方式
@@ -142,7 +165,7 @@ _KEY_SEMITONES = {"C": 0, "D": 2, "Eb": 3, "E": 4, "F": 5, "G": 7, "A": 9, "Bb":
 
 - **方向规则**：Horn/English Horn 始终向下移（如 F → chromatic=-7）；其他乐器取最近方向（semitones > 6 时向下）。
 - **八度补偿**：Bass Clarinet 额外 octave-change=-1。
-- **仅限已知移调乐器**：只有 `DEFAULT_TRANSPOSE_KEY` 中列出的乐器（Clarinet, Bass Clarinet, Horn, Trumpet, English Horn）才会生成 `<transpose>` 元素。即使 VLM 为 Timpani 返回了 `Timpani:E`（从乐谱上的 "Pauke in E tief" 识别），也不会产生错误的移调。
+- **仅限已知移调乐器**：只有 `DEFAULT_TRANSPOSE_KEY` 中列出的乐器（Clarinet, Bass Clarinet, Horn, Trumpet, English Horn）才会生成 `<transpose>` 元素。即使 VLM 为 Timpani 返回了 `Timpani:E`，也不会产生错误的移调。
 
 #### DEFAULT_TRANSPOSE_KEY（未检测到调性时的默认值）
 
@@ -156,11 +179,7 @@ _KEY_SEMITONES = {"C": 0, "D": 2, "Eb": 3, "E": 4, "F": 5, "G": 7, "A": 9, "Bb":
 
 ### System 检测与合并
 
-#### system 划分
-
 `_detect_system_breaks` 通过谱表间的垂直间距和括号位置来划分行（system）。
-
-#### 碎片合并
 
 后处理会合并被错误拆分的 system：当相邻的小组谱表数之和等于第一个 system 的谱表数时，自动合并。
 
@@ -177,7 +196,7 @@ _KEY_SEMITONES = {"C": 0, "D": 2, "Eb": 3, "E": 4, "F": 5, "G": 7, "A": 9, "Bb":
 2. **System 1+**：调用 `_ocr_extra_system_names`，裁切左边栏图像给 VLM，在已知乐器名列表（`master_names`）中匹配
    - `master_names` 优先使用跨页传播的 `part_names_override`（完整乐器列表），而非当前页 OCR 检测到的部分名字
    - 验证时用 `_instrument_base` 比较，使 `Horn` 能匹配 `Horn:F`
-3. **Override 匹配**：所有 system 的名字都会与 `part_names_override` 做子序列匹配（`_match_override_to_detected`），确保名字带有正确的移调 key，并识别出 tacet（休止）的乐器
+3. **Override 匹配**：仅当 override 乐器数**多于**当前检测数时（说明部分乐器 tacet），才触发子序列匹配（`_match_override_to_detected`）。检测数与 override 数相等时，直接使用 VLM 检测到的名字（包含当前页的正确调性信息），不替换。
 
 ### 跨页乐器名传播
 
@@ -192,9 +211,19 @@ for img in pages:
 
 1. **第一页**：正常 OCR→VLM 检测，结果存入 `detected_names`
 2. **后续页**：
-   - 若 OCR 检测到标签 → VLM 识别 → 与 `detected_names` 做 override 匹配
+   - 若 OCR 检测到标签 → VLM 识别 → override 仅在 tacet 时介入
    - 若 OCR 无标签 → 跳过 VLM → 直接复用 `detected_names`
 3. **Override 匹配算法** (`_match_override_to_detected`)：当 override 有 N 个名字但当前页只有 M 个谱表（M < N，部分乐器 tacet）时，遍历 C(N,M) 种子序列组合，按名字匹配度 + 音高范围验证选出最佳匹配，同时报告哪些乐器 tacet
+
+### 拍号推断与跨页传播
+
+`page_measure_ts` 为每个小节确定拍号，规则如下：
+
+1. **仅统计显式标记**：只有包含 `<time>` 元素的小节，以及之后拥有实音符（非全休止）的小节才参与投票。全休止符在 4/4 和 6/4 下外观完全相同，无法区分，不参与投票。
+2. **多数投票**：同一小节位置各声部拍号不同时，取票数最多的那个。
+3. **跨系统/页传播**：若某 system 内没有任何 `<time>` 标记，直接继承前一 system 最后一个小节的拍号，而非默认为 4/4。
+
+这解决了多 system 页面（如 system 1 = 6/4，system 2 新乐器入场无标记）中新乐器的全休止小节被错误地判断为 4/4 的问题。
 
 ### 显示名称
 
@@ -305,8 +334,48 @@ pipeline.py 参数：
 
 ![合并 piano roll](examples/page-005-007_merged_pianoroll.png)
 
+## Stage 4: 力度标记检测
+
+### 模型
+
+YOLOv8n 在 DeepScoresV2 dense 子集上微调 15 epoch（736张训练图，160张测试图）。
+
+- 基础权重：`yolo26n.pt`（DeepScoresV2 全类预训练）
+- 微调权重：`runs_dynamics/dynamics_finetune_15ep/weights/best.pt`
+- 检测类别（8类）：`dynamicCrescendoHairpin`, `dynamicDiminuendoHairpin`, `dynamicF`, `dynamicM`, `dynamicP`, `dynamicR`, `dynamicS`, `dynamicZ`
+
+15 epoch 优于 30 epoch，原因是 YOLO 在 epoch 21 关闭 mosaic 增强后出现分布偏移，30ep 轻微过拟合。
+
+| | 无微调 | 微调30ep | 微调15ep |
+|--|--------|---------|---------|
+| mAP50 all | 0.812 | 0.809 | **0.894** |
+| mAP50 f | 0.943 | 0.888 | **0.956** |
+| mAP50 p | 0.898 | 0.972 | **0.980** |
+| mAP50 s | 0.595 | 0.566 | **0.745** |
+
+### 置信度阈值设计
+
+**f、p 类**优先保证精度（漏报比误报代价低），阈值取 P=0.95 对应的最低置信度。  
+**s 类**（`dynamicS`，即 sforzando）只在与 f 或 p 共同出现时才有音乐意义；单独出现的 s 检测无效，因此优先保召回，取 F1 最优点。
+
+| 类别 | 置信度阈值 | Precision | Recall | 策略 |
+|------|-----------|-----------|--------|------|
+| dynamicF | **0.65** | ~0.952 | ~0.875 | precision-first (conf at P=0.95 → rounded up) |
+| dynamicP | **0.65** | ~0.952 | ~0.875 | precision-first |
+| dynamicS | **0.31** | 0.877 | 0.906 | recall-first (F1最优) |
+| 其余类别 | 0.25 | — | — | 默认 |
+
+### 力度标记后处理
+
+YOLO 检测到的原始标签（`dynamicF`、`dynamicP`、`dynamicS` 等字符）经过规则化后写入 MusicXML：
+
+- `ff`/`sf`/`mf` → `f`；`pp`/`mp` → `p`（简化为标准两级）
+- 三个及以上字母（`fff`、`ppp` 等）丢弃
+- `fp`/`pf` 丢弃（复合力度超出当前模型能力）
+- Hairpin 直接对应 `<wedge type="crescendo/diminuendo">`
+
 ## 已知局限
 
-- **VLM 谱表计数**：VLM 偶尔将大括号内的谱表数数错（多或少 1），导致乐器名错位。可通过 `part_names_override` 手动指定乐器名绕过。
 - **Tremolo 记谱**：TrOMR 无法识别 tremolo（成对黑块），产生空声部。这是模型训练数据的限制。
-- **多页声部匹配**：依赖乐器名精确匹配。如果同一乐器在不同页面被 VLM 识别为不同名称，会被视为不同声部。
+- **多页声部匹配**：依赖乐器名精确匹配。如果同一乐器在不同页面被 VLM 识别为不同名称（如移调标记变化），会被视为不同声部。可通过 `part_names_override` 手动指定乐器名绕过。
+- **VLM 调用开销**：两阶段各调用一次 API，识别耗时约为单阶段的两倍。若需加速，可用 `--no-vlm` 切换到 RapidOCR 路径（精度稍低）。

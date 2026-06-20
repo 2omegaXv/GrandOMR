@@ -31,13 +31,18 @@ INSTRUMENT_ABBREVS = {
     "flöte": "Flute", "flöten": "Flute", "flote": "Flute", "floten": "Flute",
     # Oboe
     "ob": "Oboe", "ob.": "Oboe", "oboe": "Oboe", "oboi": "Oboe", "oboen": "Oboe",
-    # Clarinet
+    # Clarinet — with German key suffix variants (Cl.Es=Eb, Cl.B=Bb, Cl.A=A, Ci.Es=OCR noise)
     "cl": "Clarinet", "cl.": "Clarinet", "clar": "Clarinet", "clarinetto": "Clarinet",
     "clarinette": "Clarinet", "clarinetten": "Clarinet", "klar": "Clarinet",
+    "ci": "Clarinet",
+    "cl.es": "Clarinet:Eb", "kl.es": "Clarinet:Eb", "ci.es": "Clarinet:Eb",
+    "cl.b": "Clarinet:Bb", "kl.b": "Clarinet:Bb", "ci.b": "Clarinet:Bb",
+    "cl.a": "Clarinet:A", "kl.a": "Clarinet:A", "ci.a": "Clarinet:A",
     # Bass Clarinet
     "baßclarinette": "Bass Clarinet", "bassclarinette": "Bass Clarinet",
     "baßklarinette": "Bass Clarinet", "bassklarinette": "Bass Clarinet",
     "bcl": "Bass Clarinet", "b.cl": "Bass Clarinet",
+    "bkl": "Bass Clarinet", "bklar": "Bass Clarinet", "bkl.": "Bass Clarinet",
     "babclarinette": "Bass Clarinet", "babklarinette": "Bass Clarinet",
     # Bassoon
     "fg": "Bassoon", "fg.": "Bassoon", "fag": "Bassoon", "fagotto": "Bassoon",
@@ -46,6 +51,7 @@ INSTRUMENT_ABBREVS = {
     "contrafagott": "Contrabassoon", "contrafag": "Contrabassoon", "cfg": "Contrabassoon",
     "kontrafagott": "Contrabassoon", "c.-fag": "Contrabassoon", "c.fag": "Contrabassoon",
     "c.-fag.": "Contrabassoon", "c.fag.": "Contrabassoon",
+    "c-fag": "Contrabassoon", "k-fag": "Contrabassoon",
     # Horn
     "cor": "Horn", "cor.": "Horn", "hn": "Horn", "hn.": "Horn", "horn": "Horn",
     "corni": "Horn", "hörner": "Horn", "horner": "Horn", "hr": "Horn", "hr.": "Horn",
@@ -208,8 +214,17 @@ def _parse_instrument_key(name: str):
 
 
 def _instrument_base(name: str) -> str:
-    """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups."""
-    return _parse_instrument_key(name)[0]
+    """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups.
+    For shared-staff names like 'Bass Drum/Cymbals', use the primary (first) instrument.
+    Falls back to longest-prefix fuzzy match (e.g. 'Violin I' → 'Violin')."""
+    base = _parse_instrument_key(name)[0]
+    if "/" in base:
+        base = base.split("/")[0].strip()
+    if base not in INSTRUMENT_MIDI:
+        match = max((k for k in INSTRUMENT_MIDI if base.startswith(k)), key=len, default=None)
+        if match:
+            base = match
+    return base
 
 
 _STEP_TO_MIDI = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -947,6 +962,8 @@ def _normalize_instrument_name(raw: str) -> str:
     # OCR l↔1 confusion: "C1." → "Cl.", "F1." → "Fl."
     text = re.sub(r'\b([A-Za-z])1([.\s])', r'\1l\2', text)
     text = re.sub(r'\b([A-Za-z])1$', r'\1l', text)
+    # OCR ) confusion with l: "C).Es" → "Cl.Es", "C).B" → "Cl.B"
+    text = re.sub(r'\b([A-Za-z])\)\.', r'\1l.', text)
     # OCR sometimes strips spaces: "BaBclarinetteinA" → "BaBclarinette in A"
     text_spaced = re.sub(r'(?i)(in)([A-Z][a-z]*)\s*$', r' \1 \2', text)
     text_no_key = re.sub(r'\s+in\s+[A-Za-z]+\s*$', '', text_spaced, flags=re.IGNORECASE).strip()
@@ -1037,22 +1054,31 @@ def _group_staves_by_brackets(sorted_staffs, brace_dots):
 
 # ── VLM-based instrument name recognition ──
 
-_VLM_PROMPT = """This is a page from an orchestral music score.
-On the left margin there are instrument names or abbreviations.
-Count the actual staff lines (each staff is a group of 5 horizontal lines) from top to bottom, and assign each one its instrument name.
-Use ONLY these base instrument names: Flute, Piccolo, Oboe, English Horn, Clarinet, Bass Clarinet, Bassoon, Contrabassoon, Horn, Trumpet, Trombone, Tuba, Bass Tuba, Timpani, Bass Drum, Harp, Celesta, Piano, Violin, Viola, Cello, Contrabass.
-For transposing instruments, append :KEY with the key letter shown on the score.
-Examples: "Kl.(A)" → "Clarinet:A", "(E)" next to "Hr." → "Horn:E", "Trpt.(B)" → "Trumpet:Bb", "Pos." → "Trombone"
-CRITICAL — output exactly {n} lines, one per staff. Determine the instrument for each staff by its VISUAL POSITION in the image, not by player numbers in the labels:
-- If one label covers 2 staves (e.g. "Hörner" spanning two staff lines), output the name TWICE.
-- If one label says "1.2" but is next to only ONE staff, output the name ONCE.
-- Never output more or fewer than {n} lines.
-Other rules:
-- "B" alone for a key means Bb (B-flat in German notation). "H" means B-natural.
-- If no key is shown for a transposing instrument, output just the base name (e.g., "Clarinet").
-- If one label covers staves with different keys (e.g. "Hr." with "(E)" and "(C)"), output one name per staff with the correct key (e.g. "Horn:E" then "Horn:C").
-- German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl.=Cello, B./Kb./K-B./K.B.=Contrabass.
-{ocr_hint}There are exactly {n} staves. Output exactly {n} lines. No numbering, no extra text."""
+# Pass 1: free-form identification — identify what instrument each staff is
+_VLM_PROMPT_PASS1 = """This is a page from an orchestral music score.
+{ocr_hint}
+Look at each staff (a group of 5 horizontal lines) from top to bottom.
+Use the stave y-positions above to anchor each staff's location. For each staff, identify which instrument it belongs to based on the label on the left margin.
+Translate German abbreviations to English (Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Vl.=Violin, Va./Br.=Viola, Vc./Vcll.=Cello, B./Kb.=Contrabass, Ten.Hr.=Tenor Horn).
+For transposing instruments include the key only if explicitly written (e.g. "Clarinet in A"). Do NOT assume default keys.
+For each staff, write one line: "Staff N (y=...): InstrumentName — reason". No markdown, no bullet points."""
+
+# Pass 2: format pass-1 result into exactly n lines using stave positions
+_VLM_PROMPT_PASS2 = """This is a page from an orchestral music score.
+{ocr_hint}
+A preliminary scan identified the following (may have errors in instrument names):
+{pass1_result}
+
+Using the stave y-positions above and the preliminary scan, output the FINAL instrument list.
+There are exactly {n} staves. Match each stave to an instrument by its y-position. Output exactly {n} lines.
+
+Use formal English instrument names. Append :KEY ONLY for transposing instruments when the key is explicitly shown (e.g. "Kl.(A)"→"Clarinet:A", "Cl.Es."→"Clarinet:Eb", "Trp.B"→"Trumpet:Bb"). Do NOT use : for numbering (write "Trombone" not "Trombone:1"). Violin parts: use "Violin I" / "Violin II".
+- If two different labels clearly point to the SAME single staff (stacked beside one staff), join: e.g. "Trombone/Tuba".
+- "B" as a KEY means Bb; "B." or "Kb." as an INSTRUMENT means Contrabass.
+- CRITICAL: "in X" key labels at different y-positions apply only to the nearest staves.
+- German: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Beck./Bck.=Cymbals, Tamt./T.-t.=Tam-tam, Trgl.=Triangle, Ten.Hr.=Tenor Horn, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl./Vcll.=Cello, B./Kb./K-B./K.B.=Contrabass.
+- Output ONLY instrument names. No explanations, no numbering, no extra text.
+There are exactly {n} staves. Output exactly {n} lines."""
 
 
 def _ocr_margin_labels(image, staff_left: float,
@@ -1080,19 +1106,27 @@ def _ocr_margin_labels(image, staff_left: float,
         if re.fullmatch(r'\d+', t):
             continue
         y_center = sum(p[1] for p in r[0]) / 4
-        kept = y_start <= y_center <= y_end
-        if not kept:
+        x_center = sum(p[0] for p in r[0]) / 4
+        if not (y_start <= y_center <= y_end):
             continue
-        items.append((y_center, t))
+        items.append((y_center, x_center, t))
     items.sort()
     if not items:
         return ""
-    labels = ", ".join(f'"{t}"' for _, t in items)
-    return f"OCR detected these labels on the left margin (top to bottom): {labels}\nUse these as reference for instrument names and keys.\n"
+
+    labels = ", ".join(f'"{t}"(x={int(x)},y={int(y)})' for y, x, t in items)
+    return (f"OCR labels on left margin (x=pixels from left, y=pixels from top, sorted top-to-bottom): {labels}\n"
+            f"Labels with LARGER x are closer to the staves and are per-staff markers (e.g. 'in Es', 'in B'). "
+            f"Labels with SMALLER x are group/bracket labels spanning multiple staves.\n"
+            f"Use these as reference for instrument names and keys.\n")
 
 
 def _vlm_read_instrument_names(image_pil, n_staves: int, ocr_hint: str = "") -> list:
-    """Use VLM API (Qwen3-VL-235B) to read instrument names from a score page."""
+    """Use VLM API (Qwen3-VL-235B) with two passes to read instrument names.
+
+    Pass 1: free-form scan (no count constraint) — identify all visible instruments.
+    Pass 2: use pass-1 result as context, then format into exactly n_staves lines.
+    """
     import base64, io
     try:
         import openai
@@ -1118,20 +1152,31 @@ def _vlm_read_instrument_names(image_pil, n_staves: int, ocr_hint: str = "") -> 
     buf = io.BytesIO()
     image_pil.save(buf, format="PNG")
     img_b64 = base64.b64encode(buf.getvalue()).decode()
+    img_content = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
 
     client = openai.OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1/")
-    prompt = _VLM_PROMPT.format(n=n_staves, ocr_hint=ocr_hint)
 
-    response = client.chat.completions.create(
+    # ── Pass 1: free-form identification ──
+    p1_prompt = _VLM_PROMPT_PASS1.format(ocr_hint=ocr_hint)
+    r1 = client.chat.completions.create(
         model="Qwen3-VL-235B-A22B-Instruct",
-        messages=[{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-            {"type": "text", "text": prompt}
-        ]}],
+        messages=[{"role": "user", "content": [img_content, {"type": "text", "text": p1_prompt}]}],
+        max_tokens=600,
+        temperature=0.0,
+    )
+    pass1_result = r1.choices[0].message.content.strip()
+    print(f"[VLM] Pass 1 raw:\n{pass1_result}")
+
+    # ── Pass 2: format into exactly n_staves lines ──
+    p2_prompt = _VLM_PROMPT_PASS2.format(
+        n=n_staves, pass1_result=pass1_result, ocr_hint=ocr_hint)
+    r2 = client.chat.completions.create(
+        model="Qwen3-VL-235B-A22B-Instruct",
+        messages=[{"role": "user", "content": [img_content, {"type": "text", "text": p2_prompt}]}],
         max_tokens=500,
         temperature=0.0,
     )
-    text = response.choices[0].message.content.strip()
+    text = r2.choices[0].message.content.strip()
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     return lines
 
@@ -1167,93 +1212,114 @@ def _ocr_crop(ocr, image, y_start, y_end, x_end):
     return valid
 
 
-def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vlm=True) -> List[str]:
+def _detect_names_for_system(sys_staves, image, brace_dots=None, use_vlm=True, coord_scale=1.0) -> List[str]:
+    """Detect instrument names for a single system's staves.
+
+    Works for any system (first, second, reduced, etc.) using the same
+    OCR-hint → VLM (3 retries) → RapidOCR fallback path.
     """
-    Identify instrument names for each staff.
-    Primary: VLM reads the full page image and outputs instrument names.
-    Fallback: RapidOCR on left margin crops with bracket grouping.
-    """
-    if not homr_staffs:
+    n = len(sys_staves)
+    if n == 0:
         return []
 
-    sorted_staffs = sorted(homr_staffs, key=lambda s: s.min_y)
-    avg_unit = float(np.median([s.average_unit_size for s in sorted_staffs]))
+    sorted_staves = sorted(sys_staves, key=lambda s: s.min_y)
+    avg_unit = float(np.median([s.average_unit_size for s in sorted_staves]))
+    staff_left = min(s.min_x for s in sorted_staves)
 
-    # Detect system boundaries using brackets
-    if brace_dots is not None:
-        systems = _detect_system_breaks(sorted_staffs, brace_dots)
-    else:
-        systems = [list(sorted_staffs)]
-
-    n_parts = len(systems[0])
-    first_system = systems[0]
-    staff_left = min(s.min_x for s in first_system)
-
-    # Bracket grouping
     if brace_dots:
-        bracket_groups = _group_staves_by_brackets(first_system, brace_dots)
+        bracket_groups = _group_staves_by_brackets(sorted_staves, brace_dots)
     else:
-        bracket_groups = [[i] for i in range(n_parts)]
+        bracket_groups = [[i] for i in range(n)]
 
-    print(f"[OCR] {n_parts} staves, {len(bracket_groups)} groups, staff_left={int(staff_left)}")
+    cs = coord_scale
+    print(f"[OCR] {n} staves, {len(bracket_groups)} groups, staff_left={int(staff_left)} (scale={cs:.2f})")
 
-    # ── Quick OCR scan for margin labels (used as VLM hint) ──
+    # Quick OCR scan for margin labels (used as VLM hint)
     ocr_hint = ""
     if use_vlm:
         try:
-            sys1_y0 = max(0, int(first_system[0].min_y - avg_unit * 3))
-            if len(systems) > 1:
-                gap_y = (systems[0][-1].max_y + systems[1][0].min_y) // 2
-                sys1_y1 = int(gap_y)
-            else:
-                sys1_y1 = None
-            ocr_hint = _ocr_margin_labels(image, staff_left,
-                                          y_start=sys1_y0, y_end=sys1_y1)
+            y0 = max(0, int((sorted_staves[0].min_y - avg_unit * 3) * cs))
+            y1 = int((sorted_staves[-1].max_y + avg_unit * 3) * cs)
+            ocr_hint = _ocr_margin_labels(image, staff_left * cs, y_start=y0, y_end=y1)
             if ocr_hint:
                 print(f"[OCR→VLM] {ocr_hint.splitlines()[0][:120]}")
         except Exception as e:
             print(f"[OCR→VLM] Failed: {e}")
 
-    # If OCR found no labels, this page has no instrument annotations — skip VLM
     if not ocr_hint:
         print(f"[OCR] No instrument labels detected, skipping VLM")
         return []
 
-    # ── Try VLM first ──
+    # Try VLM (up to 3 retries)
     if use_vlm:
         try:
             from PIL import Image as PILImage
-            # Crop image to first system only so VLM doesn't see other systems
-            sys1_img_y0 = max(0, int(first_system[0].min_y - avg_unit * 4))
-            if len(systems) > 1:
-                sys1_img_y1 = int((systems[0][-1].max_y + systems[1][0].min_y) / 2)
-            else:
-                sys1_img_y1 = image.shape[0]
-            sys1_crop = image[sys1_img_y0:sys1_img_y1, :]
-            pil_img = PILImage.fromarray(sys1_crop if sys1_crop.ndim == 3 else cv2.cvtColor(sys1_crop, cv2.COLOR_GRAY2RGB))
-            vlm_lines = _vlm_read_instrument_names(pil_img, n_staves=n_parts, ocr_hint=ocr_hint)
-            print(f"[VLM] {len(vlm_lines)} names: {vlm_lines}")
+            img_y0 = max(0, int((sorted_staves[0].min_y - avg_unit * 2) * cs))
+            img_y1 = int((sorted_staves[-1].max_y + avg_unit * 2) * cs)
+            first_note_xs = [nn.center[0] for s in sorted_staves for nn in s.get_notes()]
+            x_right = min(image.shape[1], int(min(first_note_xs) * cs)) if first_note_xs else image.shape[1]
+            sys_crop = image[img_y0:img_y1, :x_right]
+            pil_img = PILImage.fromarray(
+                sys_crop if sys_crop.ndim == 3 else cv2.cvtColor(sys_crop, cv2.COLOR_GRAY2RGB))
 
-            if len(vlm_lines) == n_parts:
-                # Validate: names should be from our known set
-                known_instruments = set(INSTRUMENT_MIDI.keys())
-                valid = sum(1 for n in vlm_lines if _instrument_base(n) in known_instruments)
-                if valid >= n_parts * 0.5:
-                    print(f"[VLM] Direct match: {valid}/{n_parts} known instruments")
-                    return vlm_lines
+            # Build per-stave OCR-label assignment for the VLM hint
+            # Parse OCR hint to extract (label, y) pairs
+            import re as _re
+            ocr_pairs = _re.findall(r'"([^"]+)"\(x=\d+,y=(\d+)\)', ocr_hint)
+            ocr_label_ys = [(txt, int(y)) for txt, y in ocr_pairs]
 
-            if vlm_lines:
-                labels = _match_vlm_names_to_staves(vlm_lines, bracket_groups, n_parts)
-                if labels:
-                    for i, name in enumerate(labels):
-                        print(f"  Staff {i}: {name}")
-                    return labels
-            print("[VLM] Could not match, falling back to RapidOCR")
+            stave_lines = []
+            for si, stv in enumerate(sorted_staves):
+                sy = int((stv.min_y + stv.max_y) / 2 * cs)
+                if ocr_label_ys:
+                    nearest = min(ocr_label_ys, key=lambda lbl: abs(lbl[1] - sy))
+                    stave_lines.append(
+                        f"  Stave {si+1} (y={sy}): nearest label '{nearest[0]}' (dist={abs(nearest[1]-sy)}px)")
+                else:
+                    stave_lines.append(f"  Stave {si+1} (y={sy})")
+            stave_hint = (
+                f"HOMR stave layout ({n} staves, crop starts at full-image y={img_y0}):\n"
+                + "\n".join(stave_lines) + "\n"
+                + "Use the nearest label for each stave. If multiple consecutive staves share the same nearest label, they all belong to that instrument.\n")
+            vlm_hint = stave_hint + ocr_hint
+
+            for attempt in range(3):
+                vlm_lines = _vlm_read_instrument_names(pil_img, n_staves=n, ocr_hint=vlm_hint)
+                print(f"[VLM] attempt {attempt+1}: {len(vlm_lines)} names: {vlm_lines}")
+
+                if len(vlm_lines) == n:
+                    known_instruments = set(INSTRUMENT_MIDI.keys())
+                    valid = sum(1 for nm in vlm_lines if _instrument_base(nm) in known_instruments)
+                    if valid >= n * 0.5:
+                        print(f"[VLM] Direct match: {valid}/{n} known instruments")
+                        return vlm_lines
+
+                if vlm_lines:
+                    labels = _match_vlm_names_to_staves(vlm_lines, bracket_groups, n)
+                    if labels:
+                        for i, name in enumerate(labels):
+                            print(f"  Staff {i}: {name}")
+                        return labels
+                print(f"[VLM] attempt {attempt+1} could not match ({len(vlm_lines)} lines, need {n}), retrying...")
+
+            print("[VLM] All retries exhausted, falling back to RapidOCR")
         except Exception as e:
             print(f"[VLM] Failed: {e}, falling back to RapidOCR")
 
-    # ── Fallback: RapidOCR ──
-    return _rapidocr_instrument_names(first_system, image, bracket_groups, n_parts, avg_unit, staff_left)
+    return _rapidocr_instrument_names(sorted_staves, image, bracket_groups, n, avg_unit, staff_left)
+
+
+def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vlm=True,
+                                     coord_scale=1.0) -> List[str]:
+    """Identify instrument names for the first system's staves."""
+    if not homr_staffs:
+        return []
+    sorted_staffs = sorted(homr_staffs, key=lambda s: s.min_y)
+    if brace_dots is not None:
+        systems = _detect_system_breaks(sorted_staffs, brace_dots)
+    else:
+        systems = [list(sorted_staffs)]
+    return _detect_names_for_system(systems[0], image, brace_dots, use_vlm, coord_scale=coord_scale)
 
 
 def _match_vlm_names_to_staves(vlm_names, bracket_groups, n_parts):
@@ -1577,159 +1643,211 @@ def inject_tremolo(result_staffs, matched_tremolo, staffs_sorted, part_count: in
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Dynamics detection via Bravura template matching
+# Dynamics detection via YOLO (ft-15ep on DeepScoresV2)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_DYNAMICS_SMUFL = {
-    'ff':  0xE52F, 'f':   0xE522, 'sf':  0xE536, 'p':   0xE520,
-    'pp':  0xE52B, 'mf':  0xE52D, 'mp':  0xE52C, 'fff': 0xE530,
-    'ppp': 0xE52A, 'sfz': 0xE539, 'sfp': 0xE537, 'fp':  0xE534,
-    'fz':  0xE535, 'rfz': 0xE53C,
+_YOLO_DYN_WEIGHTS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "runs_dynamics", "dynamics_finetune_15ep", "weights", "best.pt",
+)
+
+# f/p: precision-first (conf at P=0.95); s: recall-first (F1-optimal)
+_YOLO_DYN_CONF = {"dynamicF": 0.65, "dynamicP": 0.65, "dynamicS": 0.31}
+_YOLO_DYN_CONF_DEFAULT = 0.25
+
+# single-letter per YOLO class; compound symbols assembled by _group_glyphs
+_YOLO_CLASS_TO_LETTER = {
+    "dynamicF": "f", "dynamicP": "p", "dynamicS": "s",
+    "dynamicM": "m", "dynamicR": "r", "dynamicZ": "z",
 }
 
-# Search order: longest first so NMS prefers multi-char matches
-_DYN_SEARCH_ORDER = ['fff', 'ppp', 'sfz', 'sfp', 'rfz', 'ff', 'pp', 'mf',
-                     'mp', 'sf', 'fp', 'fz', 'f', 'p']
+# valid MusicXML <dynamics> child element names, normalised to f/p only:
+#   ff/sf/mf/fz/rf → f   |   pp/mp → p
+#   ≥3 letters (fff, ppp, sfz, rfz, sffz…) → absent → discarded
+#   mixed f+p (fp, pf, sfp…) → absent → discarded
+_COMPOUND_DYN = {
+    "f":  "f",
+    "ff": "f",
+    "sf": "f",
+    "mf": "f",
+    "fz": "f",
+    "rf": "f",
+    "p":  "p",
+    "pp": "p",
+    "mp": "p",
+}
 
-_dyn_template_cache = {}
+_yolo_dyn_model = None
+
+# expression words that are NOT dynamics (OCR filter)
+_EXPR_WORDS = {
+    "cresc", "decresc", "dim", "dimin", "poco", "molto", "sempre",
+    "dolce", "legg", "leggiero", "arco", "pizz", "spicc", "sul",
+    "piu", "meno", "assai", "subito", "marc", "espress", "tranq",
+    "riten", "rit", "accel", "rubato", "ten", "sosт", "calando",
+    "morendo", "smorzando", "perdendosi", "col", "con", "div", "unis",
+}
 
 
-def _render_dyn_template(codepoint, font_size, squeeze):
-    from PIL import Image as PILImage, ImageFont, ImageDraw
-    key = (codepoint, font_size, squeeze)
-    if key in _dyn_template_cache:
-        return _dyn_template_cache[key]
-    font = ImageFont.truetype(BRAVURA_FONT_PATH, font_size)
-    ch = chr(codepoint)
-    bbox = font.getbbox(ch)
-    if bbox[2] - bbox[0] < 2:
-        _dyn_template_cache[key] = None
-        return None
-    w, h = bbox[2] - bbox[0] + 16, bbox[3] - bbox[1] + 16
-    img = PILImage.new('L', (w, h), 255)
-    ImageDraw.Draw(img).text((8 - bbox[0], 8 - bbox[1]), ch, font=font, fill=0)
-    arr = np.array(img)
-    coords = np.where(arr < 200)
-    if len(coords[0]) == 0:
-        _dyn_template_cache[key] = None
-        return None
-    arr = arr[max(0, coords[0].min()-1):coords[0].max()+2,
-              max(0, coords[1].min()-1):coords[1].max()+2]
-    new_h = max(5, int(arr.shape[0] * squeeze))
-    arr = cv2.resize(arr, (arr.shape[1], new_h), interpolation=cv2.INTER_AREA)
-    _dyn_template_cache[key] = arr
-    return arr
+def _get_yolo_dyn_model():
+    global _yolo_dyn_model
+    if _yolo_dyn_model is None:
+        from ultralytics import YOLO
+        _yolo_dyn_model = YOLO(_YOLO_DYN_WEIGHTS)
+    return _yolo_dyn_model
+
+
+def _group_glyphs(raw):
+    """Group adjacent glyphs into compound dynamics.
+
+    raw: list of (letter, cx, cy, bw, bh)
+    Returns list of (combined_str, cx, cy).
+    """
+    if not raw:
+        return []
+    raw = sorted(raw, key=lambda d: (d[2], d[1]))  # sort by y then x
+    used = [False] * len(raw)
+    groups = []
+    for i, (li, cxi, cyi, bwi, bhi) in enumerate(raw):
+        if used[i]:
+            continue
+        group = [i]
+        used[i] = True
+        for j in range(i + 1, len(raw)):
+            if used[j]:
+                continue
+            lj, cxj, cyj, bwj, bhj = raw[j]
+            if abs(cyj - cyi) > max(bhi, bhj) * 0.6:
+                break  # sorted by y, no more close rows
+            if abs(cxj - cxi) < (bwi + bwj) * 1.1:
+                group.append(j)
+                used[j] = True
+        group.sort(key=lambda k: raw[k][1])  # sort by x
+        combined = "".join(raw[k][0] for k in group)
+        gcx = sum(raw[k][1] for k in group) / len(group)
+        gcy = sum(raw[k][2] for k in group) / len(group)
+        groups.append((combined, gcx, gcy))
+    return groups
+
+
+def _ocr_expression_regions(img_bgr):
+    """Return list of (x1,y1,x2,y2) for OCR-detected expression text regions.
+
+    Splits image into horizontal strips so small text is not downscaled.
+    """
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+        ocr = RapidOCR()
+    except ImportError:
+        return []
+
+    h = img_bgr.shape[0]
+    strip_h, overlap = 400, 50
+    regions = []
+    y = 0
+    while y < h:
+        y2 = min(y + strip_h, h)
+        strip = img_bgr[y:y2, :]
+        result, _ = ocr(strip)
+        if result:
+            for line in result:
+                box, text, conf = line
+                words = re.split(r"[\s.,:;]+", text.lower())
+                if any(w in _EXPR_WORDS for w in words if w):
+                    xs = [p[0] for p in box]
+                    ys = [p[1] + y for p in box]
+                    pad = 20
+                    regions.append((min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad))
+        y += strip_h - overlap
+    return regions
 
 
 def detect_dynamics(staffs_sorted, img_path, bar_line_boxes, homr_shape):
-    """Detect dynamics markings below each staff via Bravura template matching.
-
-    Returns list of (staff_index, measure_1based, note_index, dynamic_type)
-    where note_index is the 0-based index of the nearest note in that measure.
-    """
-    full_image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    """Detect dynamics markings via YOLO, map to (staff_idx, measure_1based, note_idx, dyn_type)."""
+    full_image = cv2.imread(img_path)
     if full_image is None:
         return []
     full_h, full_w = full_image.shape[:2]
     homr_h, homr_w = homr_shape[:2]
     coord_scale = full_w / homr_w
 
+    expr_regions = _ocr_expression_regions(full_image)
+
+    model = _get_yolo_dyn_model()
+    yolo_res = model(img_path, imgsz=1280, verbose=False)[0]
+
+    # Pass 1: collect valid single-glyph detections
+    raw_conf = []  # (letter, cx, cy, bw, bh, conf)
+    for box in yolo_res.boxes:
+        cls_name = yolo_res.names[int(box.cls)]
+        letter = _YOLO_CLASS_TO_LETTER.get(cls_name)
+        if letter is None:
+            continue
+        conf = float(box.conf)
+        if conf < _YOLO_DYN_CONF.get(cls_name, _YOLO_DYN_CONF_DEFAULT):
+            continue
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if any(ex1 <= cx <= ex2 and ey1 <= cy <= ey2 for ex1, ey1, ex2, ey2 in expr_regions):
+            continue
+        raw_conf.append((letter, cx, cy, x2 - x1, y2 - y1, conf))
+
+    # Spatial NMS: remove near-duplicate same-letter detections (keep highest conf)
+    raw_conf.sort(key=lambda d: -d[5])
+    used = [False] * len(raw_conf)
+    raw = []
+    for i, (li, cxi, cyi, bwi, bhi, _) in enumerate(raw_conf):
+        if used[i]:
+            continue
+        raw.append((li, cxi, cyi, bwi, bhi))
+        for j in range(i + 1, len(raw_conf)):
+            if not used[j] and raw_conf[j][0] == li:
+                if abs(raw_conf[j][1] - cxi) < bwi * 0.8 and abs(raw_conf[j][2] - cyi) < bhi * 0.8:
+                    used[j] = True
+
+    # Pass 2: group adjacent glyphs, map to MusicXML
     results = []
+    for combined, cx, cy in _group_glyphs(raw):
+        dyn_type = _COMPOUND_DYN.get(combined)
+        if dyn_type is None:
+            continue
+        cx_homr = cx / coord_scale
+        cy_homr = cy / coord_scale
 
-    # Calibrate font sizes from first staff's unit size
-    unit0 = float(np.median([s.average_unit_size for s in staffs_sorted]))
-    target_h = 2.0 * unit0 * coord_scale
-    # Find base font size where template height ≈ target after 0.8 squeeze
-    base_sz = int(target_h / 0.8 * (56 / 30))  # empirical ratio from Bravura
-    base_sz = max(40, min(base_sz, 72))
-    font_sizes = [base_sz - 8, base_sz - 4, base_sz, base_sz + 4, base_sz + 8]
-    squeezes = [0.70, 0.80, 0.90]
-
-    # Only search common dynamics to reduce computation
-    search_dyns = ['ff', 'sf', 'f', 'p', 'pp', 'mf', 'sfz', 'fff', 'ppp', 'fp']
-
-    for si, staff in enumerate(staffs_sorted):
-        unit = staff.average_unit_size
-        # Crop from bottom of staff to 75% of gap to next staff
-        y_top_homr = staff.max_y
-        if si + 1 < len(staffs_sorted):
-            next_min_y = staffs_sorted[si + 1].min_y
-            gap = next_min_y - staff.max_y
-            if gap < 2 * unit:
+        # Find the nearest staff above this detection
+        si = None
+        best_gap = float("inf")
+        for i, staff in enumerate(staffs_sorted):
+            if cy_homr <= staff.max_y:
                 continue
-            y_bot_homr = staff.max_y + gap * 0.75
-        else:
-            y_bot_homr = min(staff.max_y + 6 * unit, homr_h)
-
-        y1 = max(0, int(y_top_homr * coord_scale))
-        y2 = min(full_h, int(y_bot_homr * coord_scale))
-        x1 = max(0, int(staff.min_x * coord_scale))
-        x2 = min(full_w, int(staff.max_x * coord_scale))
-        if y2 - y1 < 15 or x2 - x1 < 20:
+            gap = cy_homr - staff.max_y
+            if gap < best_gap:
+                best_gap = gap
+                si = i
+        if si is None:
             continue
 
-        crop = full_image[y1:y2, x1:x2]
+        staff = staffs_sorted[si]
+        unit = staff.average_unit_size
+        staff_barlines = sorted(
+            bl.center[0] for bl in bar_line_boxes
+            if staff.min_y - unit <= bl.center[1] <= staff.max_y + unit
+        )
+        measure = 1
+        for bi, bx in enumerate(staff_barlines):
+            if cx_homr > bx:
+                measure = bi + 2
 
-        all_dets = []
-
-        for dyn_name in search_dyns:
-            cp = _DYNAMICS_SMUFL[dyn_name]
-            best_peaks = {}
-
-            for sz in font_sizes:
-                for sq in squeezes:
-                    tmpl = _render_dyn_template(cp, sz, sq)
-                    if tmpl is None:
-                        continue
-                    th, tw = tmpl.shape
-                    if th > crop.shape[0] or tw > crop.shape[1]:
-                        continue
-
-                    r = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
-                    locs = np.where(r > 0.75)
-                    for py, px in zip(*locs):
-                        score = float(r[py, px])
-                        bucket = int(px / 20)
-                        if bucket not in best_peaks or score > best_peaks[bucket][1]:
-                            best_peaks[bucket] = (int(px), score, tw)
-
-            for _, (px, score, tw) in best_peaks.items():
-                all_dets.append((px, dyn_name, score, tw))
-
-        # NMS: highest score wins; at equal score prefer longer name
-        all_dets.sort(key=lambda d: (-d[2], -len(d[1])))
-        final = []
-        for x, dyn, score, tw in all_dets:
-            if any(abs(x - fx) < max(tw, fw) * 0.8 for fx, _, _, fw in final):
-                continue
-            final.append((x, dyn, score, tw))
-
-        # Map crop x to HOMR x, then to measure and nearest note
-        staff_barlines = []
-        for bl in bar_line_boxes:
-            bl_cy = bl.center[1]
-            if staff.min_y - unit <= bl_cy <= staff.max_y + unit:
-                staff_barlines.append(bl.center[0])
-        staff_barlines.sort()
-
-        note_xs = sorted([n.center[0] for n in staff.get_notes()])
         measure_edges = [staff.min_x] + staff_barlines + [staff.max_x]
+        note_xs = sorted(n.center[0] for n in staff.get_notes())
+        m_lo = measure_edges[measure - 1] if measure - 1 < len(measure_edges) else staff.min_x
+        m_hi = measure_edges[measure] if measure < len(measure_edges) else staff.max_x
+        notes_in_m = [nx for nx in note_xs if m_lo <= nx <= m_hi]
+        note_idx = 0
+        if notes_in_m:
+            note_idx = min(range(len(notes_in_m)), key=lambda i: abs(notes_in_m[i] - cx_homr))
 
-        for x_crop, dyn, score, tw in final:
-            x_homr = (x_crop + x1) / coord_scale
-            measure = 1
-            for bi, bx in enumerate(staff_barlines):
-                if x_homr > bx:
-                    measure = bi + 2
-
-            m_lo = measure_edges[measure - 1] if measure - 1 < len(measure_edges) else staff.min_x
-            m_hi = measure_edges[measure] if measure < len(measure_edges) else staff.max_x
-            notes_in_m = [nx for nx in note_xs if m_lo <= nx <= m_hi]
-            note_idx = 0
-            if notes_in_m:
-                dists = [abs(nx - x_homr) for nx in notes_in_m]
-                note_idx = dists.index(min(dists))
-            results.append((si, measure, note_idx, dyn))
+        results.append((si, measure, note_idx, dyn_type))
 
     return results
 
@@ -2439,6 +2557,7 @@ def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
     return fallback_names
 
 
+
 def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                       tremolo_templates: str = None,
                       part_names_override: List[str] = None,
@@ -2525,7 +2644,15 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     )
 
     # ── OCR instrument names using bracket groups ──
-    part_names = ocr_instrument_names_from_staves(staffs, predictions.original, brace_dots, use_vlm=use_vlm)
+    # Use full-res image for VLM crop (HOMR downscales internally; full-res has sharper text)
+    _vlm_image = cv2.imread(img_path)
+    if _vlm_image is not None and predictions.original.shape[1] > 0:
+        _vlm_scale = _vlm_image.shape[1] / predictions.original.shape[1]
+    else:
+        _vlm_image = predictions.original
+        _vlm_scale = 1.0
+    part_names = ocr_instrument_names_from_staves(
+        staffs, _vlm_image, brace_dots, use_vlm=use_vlm, coord_scale=_vlm_scale)
 
     # If OCR/VLM returned nothing, use override as part_names for correct grouping
     if not part_names and part_names_override is not None:
@@ -2626,10 +2753,14 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
             if sys_idx == 0:
                 sys_names = part_names
             else:
+                sys_names = _detect_names_for_system(
+                    sys_staves, _vlm_image, brace_dots, use_vlm=use_vlm, coord_scale=_vlm_scale)
                 ref_names = part_names_override if part_names_override else part_names
-                sys_names = _ocr_extra_system_names(
-                    sys_staves, predictions.original, ref_names,
-                    use_vlm=use_vlm)
+                if not sys_names and ref_names:
+                    sys_names = list(ref_names)
+                    print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
+                elif ref_names and len(ref_names) > len(sys_names):
+                    sys_names = _match_override_to_detected(ref_names, sys_names)
 
             xml_args = XmlGeneratorArguments(
                 note_callback=_make_plugin_note_callback(writer_notes)
@@ -4498,6 +4629,49 @@ ORCHESTRAL_ORDER = [
 ]
 
 
+def _merge_canonical_name(name: str) -> str:
+    """Normalize a part name for merge matching.
+
+    - Standalone 'B' → 'Contrabass' (German score shorthand)
+    - Expands abbreviations for unknown names ('Ci.Es' → 'Clarinet in Eb')
+    - Strips trailing Roman/Arabic numbering ('Violin I' → 'Violin')
+    - Fills in default transposition key ('Horn' → 'Horn in F')
+    - Returns display form ('Clarinet:Eb' → 'Clarinet in Eb')
+    """
+    # Standalone single-letter special case: 'B' = Kontrabass in German scores
+    if name.strip() in ("B", "b"):
+        return "Contrabass"
+
+    work_name = name
+    if _instrument_base(name) not in INSTRUMENT_MIDI:
+        # Try abbreviation expansion for unknown names (e.g. 'Ci.Es', 'Tam-tam')
+        normalized = _normalize_instrument_name(name)
+        if _instrument_base(normalized) in INSTRUMENT_MIDI:
+            orig_base, orig_key = _parse_instrument_key(name)
+            norm_base, norm_key = _parse_instrument_key(normalized)
+            # Preserve key if normalization stripped it ('Clarinet in A' → keep 'in A')
+            if orig_key and not norm_key:
+                work_name = f"{norm_base} in {orig_key}"
+            else:
+                work_name = normalized
+
+    # Strip trailing Roman numerals or Arabic numbers ("Violin I" → "Violin")
+    n = re.sub(r'\s+(?:[IVX]+|\d+)$', '', work_name).strip()
+    instr_base_n, key_n = _parse_instrument_key(n)
+    canonical_base = _instrument_base(n)
+    if canonical_base not in INSTRUMENT_MIDI:
+        return name  # unknown instrument, leave as-is
+
+    # Fill in default transposition key when omitted ("Horn" → "Horn in F")
+    if key_n is None:
+        default_key = DEFAULT_TRANSPOSE_KEY.get(canonical_base)
+        if default_key:
+            n = f"{instr_base_n}:{default_key}"
+
+    # Always return display form (normalises 'Clarinet:Eb' → 'Clarinet in Eb')
+    return _display_name(n)
+
+
 def merge_pages(page_xmls: List[str], output_path: str):
     """Merge multiple per-page MusicXML files into a single score."""
     from math import gcd
@@ -4515,9 +4689,7 @@ def merge_pages(page_xmls: List[str], output_path: str):
             pid = part.get("id")
             sp = root.find(f'.//score-part[@id="{pid}"]')
             name = sp.findtext("part-name", "?") if sp is not None else "?"
-            base = re.sub(r'\s+\d+$', '', name)
-            if _instrument_base(base) in INSTRUMENT_MIDI:
-                name = base
+            name = _merge_canonical_name(name)
             measures = part.findall("measure")
             info.append({"name": name, "part": part, "score_part": sp,
                          "measures": measures, "n_measures": len(measures)})
@@ -4575,25 +4747,52 @@ def merge_pages(page_xmls: List[str], output_path: str):
     target_divs = min(target_divs, 96)
     print(f"[Merge] Normalizing divisions to {target_divs} (from {sorted(all_divs)})")
 
-    # Collect time signatures per page (majority vote across all parts)
-    page_time_sigs = []
+    # Collect time signatures per page, per measure offset.
+    # Rules:
+    #   1. Only count votes from measures with an explicit <time> element, OR that contain
+    #      actual pitched notes (not just whole rests — a whole rest looks the same in 6/4 and 4/4).
+    #   2. Parts that never show an explicit <time> on this page don't vote (they carry no
+    #      information about which time sig applies here).
+    #   3. For measure offsets with zero qualifying votes, inherit from the most recent
+    #      known time sig — either the previous measure on this page, or the last time sig
+    #      from the preceding page/system.
+    from collections import Counter
+    page_measure_ts = []
     for pinfo in page_data:
-        from collections import Counter
-        ts_votes = []
+        n = max(pi["n_measures"] for pi in pinfo) if pinfo else 0
+        explicit_votes: dict = {}   # mi → [(beats, beat_type), ...]
         for pi in pinfo:
-            for m in pi["measures"]:
+            cur = None  # None = no explicit <time> seen yet for this part
+            for mi, m in enumerate(pi["measures"]):
                 t = m.find(".//time")
                 if t is not None:
                     try:
-                        b = int(t.findtext("beats", "4"))
-                        bt = int(t.findtext("beat-type", "4"))
-                        ts_votes.append((b, bt))
+                        cur = (int(t.findtext("beats", "4")),
+                               int(t.findtext("beat-type", "4")))
+                        # Explicit <time> tag → always vote, regardless of note content
+                        explicit_votes.setdefault(mi, []).append(cur)
+                        continue
                     except ValueError:
                         pass
-        if ts_votes:
-            page_time_sigs.append(Counter(ts_votes).most_common(1)[0][0])
-        else:
-            page_time_sigs.append((4, 4))
+                # No <time> in this measure
+                if cur is None:
+                    continue  # Part never had explicit time sig → skip
+                # cur was established earlier; only vote if this measure has pitched notes
+                # (whole rests cannot distinguish e.g. 6/4 from 4/4)
+                has_pitch = any(n.find("pitch") is not None
+                                for n in m.findall(".//note"))
+                if has_pitch:
+                    explicit_votes.setdefault(mi, []).append(cur)
+
+        # Propagate: start from the last time sig of the preceding page/system
+        prev_ts = page_measure_ts[-1][-1] if page_measure_ts else (4, 4)
+        ts_list = []
+        cur_ts = prev_ts
+        for mi in range(n):
+            if mi in explicit_votes:
+                cur_ts = Counter(explicit_votes[mi]).most_common(1)[0][0]
+            ts_list.append(cur_ts)
+        page_measure_ts.append(ts_list if ts_list else [cur_ts])
 
     # Build merged XML
     merged_root = ET.Element("score-partwise")
@@ -4618,7 +4817,7 @@ def merge_pages(page_xmls: List[str], output_path: str):
 
     # Detect pickup (anacrusis) in first page's first measure
     pickup_ticks = None
-    beats_0, bt_0 = page_time_sigs[0]
+    beats_0, bt_0 = page_measure_ts[0][0]
     full_m1 = target_divs * beats_0 * 4 // bt_0
     for pi in page_data[0]:
         if not pi["measures"]:
@@ -4658,12 +4857,12 @@ def merge_pages(page_xmls: List[str], output_path: str):
         for page_idx, pk in enumerate(page_keys):
             page_info = page_data[page_idx]
             n_measures = max(pi["n_measures"] for pi in page_info) if page_info else 0
-            beats, beat_type = page_time_sigs[page_idx]
+            pg_ts = page_measure_ts[page_idx]  # list of (beats, beat_type) per measure offset
 
             if (name, occ) in pk:
                 pi = pk[(name, occ)]
                 cur_divs = 1
-                for m in pi["measures"]:
+                for page_mi, m in enumerate(pi["measures"]):
                     new_m = _deep_copy_element(m)
                     new_m.set("number", str(measure_num))
                     # update divisions tracking
@@ -4682,27 +4881,54 @@ def merge_pages(page_xmls: List[str], output_path: str):
                                 dur_el.text = str(round(old * scale))
                             except (ValueError, TypeError):
                                 pass
-                    # set divisions to target in attributes
+                    # set divisions to target in attributes; inject time sig when needed
+                    cur_ts = pg_ts[page_mi] if page_mi < len(pg_ts) else (4, 4)
+                    is_page_boundary = (measure_num == 1 or page_mi == 0)
+                    ts_changed = (page_mi > 0 and pg_ts[page_mi] != pg_ts[page_mi - 1])
                     attrs = new_m.find("attributes")
                     if attrs is not None:
                         d_el = attrs.find("divisions")
                         if d_el is not None:
                             d_el.text = str(target_divs)
-                    elif measure_num == 1 or (page_idx > 0 and m is pi["measures"][0]):
+                        if (is_page_boundary or ts_changed) and attrs.find("time") is None:
+                            time_el = ET.SubElement(attrs, "time")
+                            ET.SubElement(time_el, "beats").text = str(cur_ts[0])
+                            ET.SubElement(time_el, "beat-type").text = str(cur_ts[1])
+                    elif is_page_boundary:
                         attrs = ET.Element("attributes")
                         ET.SubElement(attrs, "divisions").text = str(target_divs)
+                        time_el = ET.Element("time")
+                        ET.SubElement(time_el, "beats").text = str(cur_ts[0])
+                        ET.SubElement(time_el, "beat-type").text = str(cur_ts[1])
+                        attrs.append(time_el)
                         new_m.insert(0, attrs)
+                    elif ts_changed:
+                        new_attrs = ET.Element("attributes")
+                        time_el = ET.Element("time")
+                        ET.SubElement(time_el, "beats").text = str(cur_ts[0])
+                        ET.SubElement(time_el, "beat-type").text = str(cur_ts[1])
+                        new_attrs.append(time_el)
+                        new_m.insert(0, new_attrs)
                     part_el.append(new_m)
                     measure_num += 1
-                for _ in range(n_measures - pi["n_measures"]):
-                    part_el.append(_make_rest_measure(measure_num, target_divs, beats, beat_type))
+                for filler_mi in range(n_measures - pi["n_measures"]):
+                    offset = pi["n_measures"] + filler_mi
+                    f_ts = pg_ts[offset] if offset < len(pg_ts) else (4, 4)
+                    part_el.append(_make_rest_measure(measure_num, target_divs, *f_ts))
                     measure_num += 1
             else:
+                prev_page_last_ts = (page_measure_ts[page_idx - 1][-1]
+                                     if page_idx > 0 and page_measure_ts[page_idx - 1]
+                                     else (4, 4))
                 for mi2 in range(n_measures):
+                    cur_ts = pg_ts[mi2] if mi2 < len(pg_ts) else (4, 4)
+                    prev_ts = pg_ts[mi2 - 1] if mi2 > 0 else prev_page_last_ts
+                    ts_changed = (cur_ts != prev_ts)
+                    include_attrs = (measure_num == 1 or mi2 == 0 or ts_changed)
                     dur_ovr = pickup_ticks if (measure_num == 1 and pickup_ticks is not None) else None
                     part_el.append(_make_rest_measure(
-                        measure_num, target_divs, beats, beat_type,
-                        include_attrs=(measure_num == 1 or mi2 == 0),
+                        measure_num, target_divs, *cur_ts,
+                        include_attrs=include_attrs,
                         duration_override=dur_ovr))
                     measure_num += 1
 
@@ -4775,11 +5001,14 @@ def _deep_copy_element(elem):
 
 def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True,
                        duration_override=None):
-    """Create an empty rest measure with correct divisions."""
+    """Create an empty rest measure with correct divisions and time signature."""
     m = ET.Element("measure", number=str(number))
     if include_attrs:
         attrs = ET.SubElement(m, "attributes")
         ET.SubElement(attrs, "divisions").text = str(divs)
+        time_el = ET.SubElement(attrs, "time")
+        ET.SubElement(time_el, "beats").text = str(beats)
+        ET.SubElement(time_el, "beat-type").text = str(beat_type)
     rest = ET.SubElement(m, "note")
     ET.SubElement(rest, "rest")
     if duration_override is not None:
@@ -4828,11 +5057,8 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
         if not part_names and part_names_override is not None:
             part_names = list(part_names_override)
             print(f"[Override] No labels on this page, reusing: {len(part_names)} instruments")
-        elif part_names_override is not None:
-            if len(part_names_override) == len(part_names):
-                part_names = list(part_names_override)
-            else:
-                part_names = _match_override_to_detected(part_names_override, part_names, xml_string)
+        elif part_names_override is not None and len(part_names_override) > len(part_names):
+            part_names = _match_override_to_detected(part_names_override, part_names, xml_string)
         xml_string = _inject_part_names(xml_string, part_names)
         xml_string = _cross_part_post_process(xml_string)
         final_xml_string = xml_string
@@ -4850,15 +5076,12 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
                 final_names = sys_names
                 system_master_names = list(part_names_override or sys_names or [])
             else:
-                master_names = list(part_names_override or system_master_names or [])
+                master_names = list(system_master_names or [])
                 if not sys_names and master_names:
                     sys_names = list(master_names)
                     print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
-                elif master_names:
-                    if len(master_names) == len(sys_names):
-                        sys_names = list(master_names)
-                    else:
-                        sys_names = _match_override_to_detected(master_names, sys_names, xml_string)
+                elif master_names and len(master_names) > len(sys_names):
+                    sys_names = _match_override_to_detected(master_names, sys_names, xml_string)
             xml_string = _inject_part_names(xml_string, sys_names)
             xml_string = _cross_part_post_process(xml_string)
             base, ext = os.path.splitext(output_path)
