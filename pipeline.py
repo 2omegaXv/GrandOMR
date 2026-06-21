@@ -1400,13 +1400,13 @@ def _detect_names_for_system(sys_staves, image, brace_dots=None, use_vlm=True, c
 
 
 def ocr_instrument_names_from_staves(homr_staffs, image, brace_dots=None, use_vlm=True,
-                                     coord_scale=1.0) -> List[str]:
+                                     coord_scale=1.0, predictions=None) -> List[str]:
     """Identify instrument names for the first system's staves."""
     if not homr_staffs:
         return []
     sorted_staffs = sorted(homr_staffs, key=lambda s: s.min_y)
     if brace_dots is not None:
-        systems = _detect_system_breaks(sorted_staffs, brace_dots)
+        systems = _detect_system_breaks(sorted_staffs, brace_dots, predictions)
     else:
         systems = [list(sorted_staffs)]
     return _detect_names_for_system(systems[0], image, brace_dots, use_vlm, coord_scale=coord_scale)
@@ -2283,6 +2283,33 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     )
     from homr.staff_parsing import parse_staffs
     from homr.staff_detection import detect_staff, break_wide_fragments
+    import homr.staff_detection as _hsd
+    _orig_remove_dup = _hsd.remove_duplicate_staffs
+    def _patched_remove_dup(staffs):
+        # HOMR's original logic removes any y-overlapping staff as duplicate.
+        # Adjacent staves can overlap by a few pixels due to SegNet dilation,
+        # causing legitimate staves (e.g. Viola) to be wrongly discarded.
+        # Only treat as duplicate when y-overlap exceeds 30% of the smaller staff height.
+        result = []
+        for staff in staffs:
+            overlapping = [
+                other for other in result
+                if (min(staff.max_y, other.max_y) - max(staff.min_y, other.min_y))
+                   > 0.3 * min(staff.max_y - staff.min_y, other.max_y - other.min_y)
+            ]
+            if not overlapping:
+                result.append(staff)
+                continue
+            if len(overlapping) >= 2:
+                continue
+            if len(overlapping[0].anchors) < len(staff.anchors):
+                result = [s for s in result if s != overlapping[0]]
+                result.append(staff)
+        removed = len(staffs) - len(result)
+        if removed:
+            print(f"[HOMR] Removed {removed} duplicate staff(s) (overlap>30%)")
+        return result
+    _hsd.remove_duplicate_staffs = _patched_remove_dup
     from homr.note_detection import add_notes_to_staffs, combine_noteheads_with_stems
     from homr.bar_line_detection import detect_bar_lines, prepare_bar_line_image
     from homr.brace_dot_detection import (
@@ -2360,7 +2387,8 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
         _vlm_image = predictions.original
         _vlm_scale = 1.0
     part_names = ocr_instrument_names_from_staves(
-        staffs, _vlm_image, brace_dots, use_vlm=use_vlm, coord_scale=_vlm_scale)
+        staffs, _vlm_image, brace_dots, use_vlm=use_vlm, coord_scale=_vlm_scale,
+        predictions=predictions)
 
     # If OCR/VLM returned nothing, use override as part_names for correct grouping
     if not part_names and part_names_override is not None:
@@ -2423,8 +2451,7 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
 
     first_sys_count = sys_sizes[0]
     all_same = all(sz == first_sys_count for sz in sys_sizes)
-    multi_system_mode = (n_parts > 0 and first_sys_count == n_parts
-                         and not all_same)
+    multi_system_mode = (len(system_groups) > 1 and not all_same)
 
     if multi_system_mode:
         # ── MULTI-SYSTEM with different staff counts ──
@@ -2523,6 +2550,27 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                 print(f"[Plugin] System {sys_idx + 1}: mapped {len(prebound_notes)} note box(es)")
 
             results.append((xml_string, sys_names, plugin_page))
+
+        # ── Align smaller systems to the reference (most-stave) system ──
+        if len(set(sys_sizes)) > 1:
+            max_sz    = max(sys_sizes)
+            ref_i     = sys_sizes.index(max_sz)
+            ref_xml   = results[ref_i][0]
+            ref_sigs  = _extract_part_signatures(ref_xml)
+            for i, (xml_str, sys_nm, pp) in enumerate(results):
+                if sys_sizes[i] < max_sz:
+                    det_sigs = _extract_part_signatures(xml_str)
+                    asgn, miss = _align_signatures_dp(det_sigs, ref_sigs)
+                    if miss:
+                        print(f"[Align] sys{i}: {sys_sizes[i]} staves, "
+                              f"missing ref positions {miss} → inserting empty parts")
+                        xml_str = _realign_xml_to_reference(xml_str, asgn, miss, ref_xml)
+                        new_nm  = [None] * max_sz
+                        for j, rp in enumerate(asgn):
+                            if j < len(sys_nm):
+                                new_nm[rp] = sys_nm[j]
+                        sys_nm = [n or f'Part {k + 1}' for k, n in enumerate(new_nm)]
+                    results[i] = (xml_str, sys_nm, pp)
 
         if collect_plugin_data:
             if not any(plugin_page is not None for _xml, _names, plugin_page in results):
@@ -2693,6 +2741,149 @@ def _display_name(name: str) -> str:
     if key:
         return f"{base} in {key}"
     return base
+
+
+def _extract_part_signatures(xml_string: str) -> list:
+    """Return (clef_cat, key_fifths) for each part. clef_cat: G=0, C=1, F=2."""
+    try:
+        root = ET.fromstring(xml_string)
+    except ET.ParseError:
+        return []
+    sigs = []
+    for part in root.findall('part'):
+        sign = (part.findtext('.//clef/sign') or 'G').strip()
+        clef_cat = {'G': 0, 'C': 1, 'F': 2}.get(sign, 0)
+        try:
+            fifths = int(part.findtext('.//key/fifths') or '0')
+        except ValueError:
+            fifths = 0
+        sigs.append((clef_cat, fifths))
+    return sigs
+
+
+def _align_signatures_dp(detected: list, reference: list) -> tuple:
+    """Order-preserving DP alignment of detected stave signatures to reference.
+
+    Minimises clef distance (weight 10) + key distance; leftward tiebreak.
+    Returns (assignment, missing):
+      assignment[i] = ref index for detected stave i
+      missing       = ref indices not matched (tacet)
+    """
+    n, m = len(detected), len(reference)
+    if n >= m:
+        return list(range(m)), []
+
+    def dist(d, r):
+        return abs(d[0] - r[0]) * 10 + abs(d[1] - r[1])
+
+    INF = float('inf')
+    dp  = [[INF] * (m + 1) for _ in range(n + 1)]
+    par = [[0]   * (m + 1) for _ in range(n + 1)]   # 0=skip, 1=match
+    for j in range(m + 1):
+        dp[0][j] = 0
+
+    for i in range(1, n + 1):
+        for j in range(i, m + 1):
+            if dp[i][j - 1] <= dp[i][j]:            # skip ref[j-1] (leftward tiebreak)
+                dp[i][j] = dp[i][j - 1]
+                par[i][j] = 0
+            c = dp[i - 1][j - 1] + dist(detected[i - 1], reference[j - 1])
+            if c < dp[i][j]:                         # match (strict < keeps skip on tie)
+                dp[i][j] = c
+                par[i][j] = 1
+
+    assignment = []
+    i, j = n, m
+    while i > 0:
+        if par[i][j] == 1:
+            assignment.append(j - 1)
+            i -= 1
+            j -= 1
+        else:
+            j -= 1
+    assignment.reverse()
+
+    matched = set(assignment)
+    missing = [k for k in range(m) if k not in matched]
+    return assignment, missing
+
+
+def _build_empty_part(ref_part_elem, pid: str):
+    """Clone ref_part_elem structure, replacing all notes with measure rests."""
+    import copy
+    p = ET.Element('part', {'id': pid})
+    cur_divs, cur_beats, cur_beat_type = 4, 4, 4
+    for m in ref_part_elem.findall('measure'):
+        new_m = ET.Element('measure', m.attrib)
+        attrs = m.find('attributes')
+        if attrs is not None:
+            new_m.append(copy.deepcopy(attrs))
+            d  = attrs.findtext('divisions')
+            b  = attrs.findtext('time/beats')
+            bt = attrs.findtext('time/beat-type')
+            if d:  cur_divs      = int(d)
+            if b:  cur_beats     = int(b)
+            if bt: cur_beat_type = int(bt)
+        dur = cur_divs * cur_beats * 4 // cur_beat_type
+        note = ET.SubElement(new_m, 'note')
+        ET.SubElement(note, 'rest', {'measure': 'yes'})
+        ET.SubElement(note, 'duration').text = str(dur)
+        p.append(new_m)
+    return p
+
+
+def _realign_xml_to_reference(xml_string: str, assignment: list,
+                               missing: list, ref_xml: str) -> str:
+    """Reorder parts in xml_string and insert rest-filled parts at missing positions.
+
+    assignment[i] = ref-index matched to detected part i.
+    missing       = ref-indices that need empty parts inserted.
+    ref_xml       = reference system xml (for cloning empty-part measure layout).
+    """
+    import copy
+    try:
+        root     = ET.fromstring(xml_string)
+        ref_root = ET.fromstring(ref_xml)
+    except ET.ParseError:
+        return xml_string
+
+    old_parts = root.findall('part')
+    part_list = root.find('part-list')
+    old_sps   = part_list.findall('score-part') if part_list is not None else []
+    ref_parts = ref_root.findall('part')
+    ref_tmpl  = ref_parts[0] if ref_parts else (old_parts[0] if old_parts else None)
+
+    total = len(assignment) + len(missing)
+
+    pos_to_part = {ref_pos: old_parts[i] for i, ref_pos in enumerate(assignment) if i < len(old_parts)}
+    pos_to_sp   = {ref_pos: old_sps[i]   for i, ref_pos in enumerate(assignment) if i < len(old_sps)}
+
+    # Rebuild part-list and parts in reference order
+    if part_list is not None:
+        for sp in list(old_sps):
+            part_list.remove(sp)
+    for p in list(old_parts):
+        root.remove(p)
+
+    for ref_pos in range(total):
+        pid = f'P{ref_pos + 1}'
+        if ref_pos in pos_to_sp:
+            sp = pos_to_sp[ref_pos]
+            sp.set('id', pid)
+        else:
+            sp = ET.Element('score-part', {'id': pid})
+            ET.SubElement(sp, 'part-name').text = f'Part {ref_pos + 1}'
+        if part_list is not None:
+            part_list.append(sp)
+
+        if ref_pos in pos_to_part:
+            p = pos_to_part[ref_pos]
+            p.set('id', pid)
+        else:
+            p = _build_empty_part(ref_tmpl, pid) if ref_tmpl is not None else ET.Element('part', {'id': pid})
+        root.append(p)
+
+    return ET.tostring(root, encoding='unicode')
 
 
 def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
@@ -2941,13 +3132,19 @@ def _cross_part_post_process(xml_string: str, prev_ts=None, prev_bar_ended: bool
             # Continuation: inherit the previous time sig unless something signals a change.
             # PRIMARY signal: content-based bar-length vote differs from prev_ts.
             # SECONDARY signal: TrOMR denominator changed (reliable token read).
-            # Same-denominator HOMR disagreement alone is NOT enough (too noisy).
+            # Content alone is NOT enough in the continuation case: a single part
+            # with missed barlines can push content to an absurd value (e.g. 8/4)
+            # even when all other parts are whole rests and give no signal.
             _content_seg1 = _infer_ts_from_measures(root, m_start, seg1_end)
             homr_seg1, homr_conf = _homr_ts(m_start, seg1_end)
             _denom_changed = (homr_seg1 is not None and homr_seg1[1] != prev_ts[1])
-            _content_changed = (_content_seg1 is not None and _content_seg1 != prev_ts)
-            if _denom_changed or _content_changed:
-                # Prefer content-based when available; fall back to HOMR symbol.
+            # Content change only accepted when HOMR independently agrees (same-denom).
+            _content_confirmed = (
+                _content_seg1 is not None
+                and _content_seg1 != prev_ts
+                and homr_seg1 == _content_seg1
+            )
+            if _denom_changed or _content_confirmed:
                 seg1_ts = _content_seg1 or homr_seg1
                 _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
                 _src = "content" if _content_seg1 else f"HOMR (conf={homr_conf:.0%})"
