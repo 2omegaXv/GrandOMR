@@ -409,22 +409,11 @@ By finding the marker in MuseScore's scan result, we can locate the correspondin
 % ─────────────────────────────────────────────────────────────────────────────
 
 \subsection{Experimental Setup}
-% Test data: IMSLP scans + OpenScore Orchestra ground truth (~100 movements)
-% Baselines: Audiveris, homr, LEGATO
-% Metrics: mAP (layout), SER / TEDn (recognition), accuracy (instrument), mAP50 (dynamics)
-
-We evaluate on IMSLP scans of full orchestral scores for which OpenScore Orchestra provides aligned ground-truth MusicXML, comprising approximately 100 movements drawn from the standard symphonic and operatic repertoire.
-Pages were rendered at 300~DPI, matching the default resolution used during pipeline development.
 
 We compare against three baselines representing distinct points in the OMR design space.
 \textbf{Audiveris} serves as the rule-based baseline; we use its default configuration and measure its output against ground truth without any post-processing.
 \textbf{homr} (TrOMR + SegNet front-end, no instrument identity) serves as the neural staff-level baseline; its MusicXML output carries generic part labels.
 \textbf{LEGATO} serves as the end-to-end vision-language baseline; pages are processed individually due to its output-length constraint.
-
-We report three categories of metrics.
-Instrument classification accuracy is measured as the fraction of staves on pages with visible labels that are assigned the correct canonical instrument name.
-Music recognition quality is measured by Symbol Error Rate (SER) and Tree Edit Distance normalised (TEDn) computed on the per-page TrOMR output against ground-truth MusicXML.
-Dynamics detection quality is measured by mAP50 on the DeepScoresV2 dense test set across the eight target classes.
 
 \subsection{Instrument Classification}
 % Per-staff instrument accuracy: VLM (two-pass) vs.\ OCR-only
@@ -432,9 +421,64 @@ Dynamics detection quality is measured by mAP50 on the DeepScoresV2 dense test s
 \todo{Results}
 
 \subsection{Music Recognition}
-% SER and TEDn on per-page outputs
 
-\todo{Results}
+\paragraph{Benchmark.}
+There is no existing benchmark metric that fully captures all the improvements made by GrandOMR.
+Many of our changes target practical orchestral usability: part identity, playback-related musical attributes, and score-level consistency.
+These details are musically important.
+For example, a wrong instrument label or transposition may look like a small notation error, but it can change the playback result for an entire part.
+Still, even an incomplete quantitative metric can show part of the improvement, especially when it reflects structural stability across many staves and pages.
+
+We evaluate on the OpenScore Orchestra subset\footnote{\url{https://huggingface.co/datasets/zzsi/openscore}}, using the \texttt{pages\_transcribed} configuration, test split, filtered by \texttt{corpus == "orchestra"}.
+The original subset contains 242 full-page orchestra pages from 8 scores.
+During ground-truth review, we found severe ground-truth errors in three scores and excluded them from the final evaluation: \texttt{Beethoven\_Op.68\_5}, \texttt{Beethoven\_Op.21\_2}, and \texttt{Bach\_BWV.232\_18}.
+The remaining clean subset contains 66 pages from 5 scores: \texttt{Bach\_BWV.232\_02}, \texttt{Bach\_BWV.232\_09a}, \texttt{Bach\_BWV.232\_12}, \texttt{Bach\_BWV.232\_16}, and \texttt{Beethoven\_Op.21\_4}.
+
+The OpenScore benchmark is originally page-level.
+To evaluate the score-level behavior that GrandOMR is designed for, we also reconstruct the 5 accepted scores as book-level inputs by grouping their pages back into complete scores.
+This book-level setting exposes errors that page-level averaging can hide, such as unstable part alignment and broken measure continuity across pages.
+
+\paragraph{Metric.}
+We use OMR-NED as the main metric.
+OMR-NED is the metric recommended in TrOMR.
+It is a normalized edit-distance metric designed for OMR evaluation.
+It compares the predicted MusicXML with the ground truth after converting the score into an OMR-oriented symbolic representation.
+In practice, OMR-NED is most sensitive to note-level content and structural alignment, including wrong notes, rhythm notation errors, missing musical structure, and cross-part misalignment.
+It also counts local symbols such as accidentals, key signatures, dynamics, and articulations, but these usually contribute less to the total score than large note, measure, or staff alignment errors.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcc@{}}
+\toprule
+& \textbf{Page-level OMR-NED $\downarrow$} & \textbf{Book-level OMR-NED $\downarrow$} \\
+\midrule
+LEGATO   & 0.6829 & --- \\
+homr     & 0.3210 & 0.5217 \\
+GrandOMR & \textbf{0.2854} & \textbf{0.2968} \\
+\bottomrule
+\end{tabular}
+\caption{OMR-NED on the cleaned OpenScore Orchestra subset.}
+\label{tab:openscore_omr_ned}
+\end{table}
+
+\paragraph{Results.}
+We report homr, GrandOMR, and LEGATO because all three can produce page-level MusicXML on the clean subset.
+LEGATO is not reported at book level because its native inference interface does not support book-level input.
+
+On page-level OMR-NED, GrandOMR improves over homr from 0.3210 to 0.2854.
+This is a moderate improvement, which is expected because OMR-NED is dominated by note and structure alignment rather than by every local post-processing target.
+Nevertheless, the improvement shows that the additional post-processing does not merely add metadata or playback convenience; it also improves the symbolic score under a standard OMR metric.
+
+The book-level result is more informative for our goal.
+homr degrades substantially from page-level 0.3210 to book-level 0.5217.
+This does not necessarily mean that each page is recognized worse.
+Rather, book-level evaluation amplifies cross-page alignment failures: if the part order, number of parts, or measure continuity changes across pages, musicdiff can interpret the resulting mismatch as large insertions or deletions of entire measures or staves.
+These errors are limited to one page in page-level scoring, but they propagate through the merged score in book-level scoring.
+
+GrandOMR is much more stable in this setting.
+Its book-level OMR-NED is 0.2968, close to its page-level score and far below homr's book-level result.
+This suggests that the score-level mechanisms in GrandOMR, including part tracking, page merging, and orchestra-specific post-processing, reduce the cross-page misalignment errors that dominate full-score evaluation.
+In other words, even though OMR-NED does not fully measure every improvement we made, it still captures the main structural benefit of adapting homr to large orchestral scores.
 
 \subsection{End-to-End Comparison with homr / LEGATO}
 
