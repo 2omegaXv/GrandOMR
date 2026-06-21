@@ -2048,12 +2048,6 @@ def _left_margin_cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
     returns a list of (y_top, y_bot) tuples in HOMR coordinates."""
     h_hom, w_hom = predictions.original.shape[:2]
 
-    median_min_x = float(np.median([s.min_x for s in staffs_sorted]))
-    valid_staffs = [s for s in staffs_sorted if s.min_x <= median_min_x * 3]
-    if not valid_staffs:
-        return []
-    staff_left_max = max(s.min_x for s in valid_staffs)
-
     union_hom = (
         predictions.staff |
         predictions.clefs_keys |
@@ -2062,11 +2056,8 @@ def _left_margin_cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
         predictions.symbols
     ).astype(np.uint8) * 255
 
-    margin_hom = int(staff_left_max + avg_staff_h * 0.3)
-    union_cropped = union_hom[:, :margin_hom]
-
     num_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(
-        union_cropped, connectivity=8)
+        union_hom, connectivity=8)
 
     min_h = avg_staff_h
     tall_intervals = []
@@ -2079,7 +2070,7 @@ def _left_margin_cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
     if not tall_intervals:
         return []
 
-    gap_tol = avg_staff_h
+    gap_tol = 5
     tall_intervals.sort()
     merged = []
     for top, bot in tall_intervals:
@@ -2926,37 +2917,41 @@ def _cross_part_post_process(xml_string: str, prev_ts=None, prev_bar_ended: bool
         # Segment before (or without) first double barline
         seg1_was_fallback = False
         if prev_ts is None or prev_bar_ended:
-            # No prior context, OR new section starts after a double barline:
-            # Trust HOMR's time sig. At a system start TrOMR correctly reads the
-            # denominator token and HOMR derives the numerator from note durations,
-            # which is more reliable than our purely note-based inference.
+            # No prior context, OR new section starts after a double barline.
+            # PRIMARY: vote from actual bar lengths of non-whole-rest measures —
+            # immune to TrOMR misreading the time-sig symbol (e.g. 2/4 → 4/4).
+            # FALLBACK: TrOMR's embedded <time> elements if content gives nothing.
+            _content_ts = _infer_ts_from_measures(root, m_start, seg1_end)
             _h, _h_conf = _homr_ts(m_start, seg1_end)
-            seg1_ts = _h or (4, 4)
-            if _h is None:
-                # HOMR had only invalid time sigs (e.g. beat-type=1); apply the fallback.
+            if _content_ts is not None:
+                seg1_ts = _content_ts
+                _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
+                _homr_note = (f" (HOMR={_h[0]}/{_h[1]})" if _h and _h != _content_ts else "")
+                fixes.append(f"m{m_start}-{seg1_end}: content {seg1_ts[0]}/{seg1_ts[1]}{_homr_note}")
+            elif _h is not None:
+                seg1_ts = _h
+                fixes.append(f"m{m_start}-{seg1_end}: HOMR {seg1_ts[0]}/{seg1_ts[1]} (conf={_h_conf:.0%})")
+                # Don't call _apply_ts_to_segment: keep TrOMR's embedded time sigs in place
+            else:
+                seg1_ts = (4, 4)
                 seg1_was_fallback = True
                 _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
                 fixes.append(f"m{m_start}-{seg1_end}: fallback {seg1_ts[0]}/{seg1_ts[1]}")
-            else:
-                fixes.append(f"m{m_start}-{seg1_end}: HOMR {seg1_ts[0]}/{seg1_ts[1]} (conf={_h_conf:.0%})")
-            # Don't call _apply_ts_to_segment when HOMR gave a valid ts: keep it in place
         else:
-            # Continuation: inherit the previous time sig as-is (no normalization so
-            # that 3/2 stays 3/2 instead of being coerced to 6/4).
-            # Safety check: if HOMR's denominator differs from the inherited one, a
-            # new time sig is printed in this system → trust HOMR instead of inheriting.
+            # Continuation: inherit the previous time sig unless something signals a change.
+            # PRIMARY signal: content-based bar-length vote differs from prev_ts.
+            # SECONDARY signal: TrOMR denominator changed (reliable token read).
+            # Same-denominator HOMR disagreement alone is NOT enough (too noisy).
+            _content_seg1 = _infer_ts_from_measures(root, m_start, seg1_end)
             homr_seg1, homr_conf = _homr_ts(m_start, seg1_end)
-            if homr_seg1 is not None and homr_seg1 != prev_ts and (
-                homr_seg1[1] != prev_ts[1]          # denominator changed
-                or homr_conf >= 0.90                # or same denom, numerator changed, very high agreement
-            ):
-                # A new printed time sig exists; trust HOMR.
-                # Denominator change is a hard signal (TrOMR reads the token directly).
-                # Same-denominator numerator change requires near-unanimous agreement to
-                # avoid acting on truncation artifacts (e.g. 3/2 misread as 2/2 due to
-                # missing rests), but is necessary for real changes like 3/2 → 2/2.
-                seg1_ts = homr_seg1
-                fixes.append(f"m{m_start}-{seg1_end}: HOMR {seg1_ts[0]}/{seg1_ts[1]} (was {prev_ts[0]}/{prev_ts[1]}, conf={homr_conf:.0%})")
+            _denom_changed = (homr_seg1 is not None and homr_seg1[1] != prev_ts[1])
+            _content_changed = (_content_seg1 is not None and _content_seg1 != prev_ts)
+            if _denom_changed or _content_changed:
+                # Prefer content-based when available; fall back to HOMR symbol.
+                seg1_ts = _content_seg1 or homr_seg1
+                _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
+                _src = "content" if _content_seg1 else f"HOMR (conf={homr_conf:.0%})"
+                fixes.append(f"m{m_start}-{seg1_end}: {_src} {seg1_ts[0]}/{seg1_ts[1]} (was {prev_ts[0]}/{prev_ts[1]})")
             else:
                 seg1_ts = prev_ts
                 _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
@@ -2972,15 +2967,10 @@ def _cross_part_post_process(xml_string: str, prev_ts=None, prev_bar_ended: bool
                 _seg_end = _all_dbls[_i + 1] if _i + 1 < len(_all_dbls) else m_end
                 if _seg_start > m_end:
                     break
+                _seg_ts_c = _infer_ts_from_measures(root, _seg_start, _seg_end)
                 _seg_ts_h, _ = _homr_ts(_seg_start, _seg_end)
-                if _seg_ts_h is not None:
-                    _seg_ts = _seg_ts_h
-                elif _i == 0 and seg1_was_fallback:
-                    _seg_ts = seg1_ts
-                elif _prev_seg_ts[1] == 4:
-                    _seg_ts = _infer_ts_from_measures(root, _seg_start, _seg_end) or _prev_seg_ts
-                else:
-                    _seg_ts = _prev_seg_ts
+                _fallback = seg1_ts if (_i == 0 and seg1_was_fallback) else _prev_seg_ts
+                _seg_ts = _seg_ts_c or _seg_ts_h or _fallback
                 _apply_ts_to_segment(root, _seg_ts, _seg_start, _seg_end)
                 last_ts = _seg_ts
                 fixes.append(f"m{_seg_start}-{_seg_end}: HOMR/inferred {_seg_ts[0]}/{_seg_ts[1]}")
@@ -4407,12 +4397,16 @@ STANDARD_RANGES = {
 }
 
 
-def quality_check(musicxml_path: str, save_pianoroll: bool = True):
+def quality_check(musicxml_path: str, png_path: str = None, title: str = None):
     """Analyze MusicXML quality: note counts, ranges, duration errors, piano roll."""
     import music21
     s = music21.converter.parse(musicxml_path)
 
     base = os.path.splitext(musicxml_path)[0]
+    if png_path is None:
+        png_path = base + "_pianoroll.png"
+    if title is None:
+        title = os.path.basename(musicxml_path)
     print(f"\n{'='*70}")
     print(f"QUALITY REPORT: {os.path.basename(musicxml_path)}")
     print(f"{'='*70}")
@@ -4471,7 +4465,7 @@ def quality_check(musicxml_path: str, save_pianoroll: bool = True):
         print("No issues found.")
 
     # Piano roll
-    if save_pianoroll:
+    if True:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
@@ -4502,7 +4496,7 @@ def quality_check(musicxml_path: str, save_pianoroll: bool = True):
         ax.autoscale_view(scalex=True, scaley=False)
         ax.set_xlabel("Beat offset (quarter notes)")
         ax.set_ylabel("MIDI pitch")
-        ax.set_title(os.path.basename(musicxml_path))
+        ax.set_title(title, fontsize=16, fontweight='bold')
         yticks = range(int(ax.get_ylim()[0]) // 6 * 6, int(ax.get_ylim()[1]) + 1, 6)
         ax.set_yticks(list(yticks))
         ax.set_yticklabels([music21.pitch.Pitch(m).nameWithOctave for m in yticks])
@@ -4510,12 +4504,12 @@ def quality_check(musicxml_path: str, save_pianoroll: bool = True):
         labels = [f"P{i+1} {part.partName or ''}" for i, part in enumerate(s.parts)]
         ax.legend(handles=[mpatches.Patch(color=colors[i], label=labels[i])
                            for i in range(len(s.parts))],
-                  loc='upper right', fontsize=7, ncol=2)
+                  loc='upper right', fontsize=10, ncol=2)
         plt.tight_layout()
-        png_path = base + "_pianoroll.png"
         plt.savefig(png_path, dpi=150)
         plt.close()
         print(f"\nPiano roll: {png_path}")
+
 
     print(f"{'='*70}")
     return issues
@@ -4609,7 +4603,12 @@ def _double_bar_measures(root) -> list:
 
 
 def _infer_ts_from_measures(root, from_m: int, to_m: int) -> "tuple | None":
-    """Vote for time sig from non-whole-rest measures in measure range [from_m, to_m]."""
+    """Vote for time sig from non-whole-rest measures in measure range [from_m, to_m].
+
+    A single whole-rest note fills any bar regardless of time signature and is
+    excluded.  All other measures (pitched notes, partial rests, mixed) carry
+    actual bar-length information and are included in the vote.
+    """
     from collections import Counter as _Counter
     ql_to_ts = {2.0: (2, 4), 3.0: (3, 4), 4.0: (4, 4), 6.0: (6, 4)}
     qls = []
@@ -4631,12 +4630,16 @@ def _infer_ts_from_measures(root, from_m: int, to_m: int) -> "tuple | None":
             if not (from_m <= mnum <= to_m):
                 continue
             notes = m.findall("note")
-            if not any(n.find("pitch") is not None for n in notes):
-                continue  # all-rest measure: skip
+            active = [n for n in notes if n.find("chord") is None]
+            if not active:
+                continue
+            # Skip a single whole-rest: it fills any bar and encodes no bar-length info.
+            if (len(active) == 1
+                    and active[0].find("pitch") is None
+                    and active[0].findtext("type", "") in ("whole", "")):
+                continue
             note_sum = 0
-            for n in notes:
-                if n.find("chord") is not None:
-                    continue
+            for n in active:
                 try:
                     note_sum += int(n.findtext("duration", "0"))
                 except ValueError:
