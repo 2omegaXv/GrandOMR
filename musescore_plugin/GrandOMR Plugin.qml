@@ -15,11 +15,13 @@ MuseScore {
 
     property var noteIndex: []
     property int lastSequence: -1
+    property int lastCommandSequence: -1
     property bool requestInFlight: false
     property bool connected: false
     property bool showMarker: true
     property var markerElement: null
     property string bridgeUrl: "http://127.0.0.1:8765"
+    property string lastScoreSignature: ""
 
     Column {
         anchors.fill: parent
@@ -55,6 +57,10 @@ MuseScore {
             Button {
                 text: "Poll Once"
                 onClicked: pollOnce()
+            }
+            Button {
+                text: "Play/Pause"
+                onClicked: runPlayPause()
             }
             Button {
                 text: "Clear Log"
@@ -165,6 +171,7 @@ MuseScore {
             return
         }
         scanScore()
+        lastScoreSignature = scoreSignature()
         root.connected = true
         pollTimer.running = true
         log("Connected; polling " + root.bridgeUrl)
@@ -174,8 +181,13 @@ MuseScore {
 
     function registerScore() {
         var scorePath = curScore ? curScore.filePath : ""
+        var state = describeScoreState()
         httpGet("/register?scorePath=" + encodeQuery(scorePath)
-                + "&noteCount=" + encodeQuery(noteIndex.length),
+                + "&noteCount=" + encodeQuery(noteIndex.length)
+                + "&scoreMode=" + encodeQuery(state.mode)
+                + "&currentPartIdx=" + encodeQuery(state.currentPartIdx === null ? "" : state.currentPartIdx)
+                + "&currentPartName=" + encodeQuery(state.currentPartName)
+                + "&partNames=" + encodeQuery(state.partNames.join("|")),
                 function(text) {
                     log("Bridge register: " + text)
                 })
@@ -193,17 +205,57 @@ MuseScore {
             log("No score is open")
             return
         }
-        httpGet("/next?lastSequence=" + encodeQuery(lastSequence), function(text) {
+        maybeRescanFocusedScore()
+        httpGet("/next?lastSequence=" + encodeQuery(lastSequence)
+                + "&lastCommandSequence=" + encodeQuery(lastCommandSequence), function(text) {
             try {
                 var response = JSON.parse(text)
-                if (!response || !response.selector) {
+                if (!response) {
                     return
                 }
-                handleSelector(response.selector)
+                if (response.command) {
+                    handleCommand(response.command)
+                }
+                if (response.selector) {
+                    handleSelector(response.selector)
+                }
             } catch (error) {
                 log("Poll parse error: " + error)
             }
         })
+    }
+
+    function runPlayPause() {
+        try {
+            cmd("play")
+            log("Playback toggled")
+        } catch (error) {
+            log("Play/Pause failed: " + error)
+        }
+    }
+
+    function handleCommand(command) {
+        var sequence = command.sequence || 0
+        if (sequence === lastCommandSequence) {
+            return
+        }
+        lastCommandSequence = sequence
+        if (command.name === "playPause") {
+            runPlayPause()
+        } else if (command.name === "openParts") {
+            runOpenParts()
+        } else {
+            log("Unknown command: " + JSON.stringify(command))
+        }
+    }
+
+    function runOpenParts() {
+        try {
+            cmd("parts")
+            log("Parts command sent")
+        } catch (error) {
+            log("Parts command failed: " + error)
+        }
     }
 
     function fractionToTicks(frac) {
@@ -241,6 +293,69 @@ MuseScore {
         var pc = ((pitch % 12) + 12) % 12
         var octave = Math.floor(pitch / 12) - 1
         return names[pc] + octave
+    }
+
+    function readPartName(part, fallback) {
+        if (!part) {
+            return fallback
+        }
+        var props = ["partName", "longName", "shortName", "name", "id"]
+        for (var i = 0; i < props.length; i++) {
+            try {
+                var value = part[props[i]]
+                if (value !== undefined && value !== null && String(value) !== "") {
+                    return String(value)
+                }
+            } catch (ignored) {
+            }
+        }
+        return fallback
+    }
+
+    function collectPartNames() {
+        var names = []
+        try {
+            var parts = curScore.parts || []
+            for (var i = 0; i < parts.length; i++) {
+                names.push(readPartName(parts[i], "Part " + (i + 1)))
+            }
+        } catch (ignored) {
+        }
+        return names
+    }
+
+    function describeScoreState() {
+        var names = collectPartNames()
+        var nstaves = curScore ? (curScore.nstaves || 0) : 0
+        var ntracks = curScore ? (curScore.ntracks || 0) : 0
+        var mode = nstaves === 1 && ntracks <= 4 && names.length === 1 ? "part" : "main"
+        var currentPartName = mode === "part" ? names[0] : ""
+        return {
+            mode: mode,
+            currentPartIdx: null,
+            currentPartName: currentPartName,
+            partNames: names
+        }
+    }
+
+    function scoreSignature() {
+        if (!curScore) {
+            return "<none>"
+        }
+        var state = describeScoreState()
+        return state.mode + "|staves=" + (curScore.nstaves || 0)
+                + "|tracks=" + (curScore.ntracks || 0)
+                + "|part=" + state.currentPartName
+                + "|parts=" + state.partNames.join("|")
+    }
+
+    function maybeRescanFocusedScore() {
+        var signature = scoreSignature()
+        if (signature !== lastScoreSignature) {
+            lastScoreSignature = signature
+            scanScore()
+            registerScore()
+        }
     }
 
     function scanScore() {

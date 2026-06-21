@@ -48,7 +48,9 @@ to your MuseScore 4 plugin directory. On Windows this is usually:
 
 In MuseScore, open `Plugins > Manage plugins`, find `GrandOMR Plugin`, and enable it. Then start it from `Plugins > Composing/arranging tools > GrandOMR Plugin`.
 
-After the MuseScore plugin is running, click a note in the browser viewer. MuseScore should select the matching note in the open score, add a red marker to it, and move the view to that page. If you open another score, click `Rescan Score` in the plugin.
+After the MuseScore plugin is running, wait until the browser viewer shows `MuseScore: Connected`. Do not start note selection or playback control while the viewer still says `Stale` or `Disconnected`.
+
+Once connected, click a note in the browser viewer. MuseScore should select the matching note in the open score, add a red marker to it, and move the view to that page. If you open another score, click `Rescan Score` in the plugin.
 
 ## Method
 

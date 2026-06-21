@@ -24,23 +24,38 @@ class BridgeState:
         self.lock = threading.Lock()
         self.sequence = 0
         self.selector = None
+        self.command_sequence = 0
+        self.command = None
         self.selected = {}
         self.score_path = ""
         self.note_count = 0
+        self.score_mode = "unknown"
+        self.current_part_idx = None
+        self.current_part_name = ""
+        self.part_names = [
+            str(part.get("name") or part.get("partName") or f"Part {idx + 1}")
+            for idx, part in enumerate(manifest.get("parts", []))
+        ]
         self.last_poll = 0.0
 
-    def set_note(self, omr_id: str) -> dict | None:
+    def set_note(self, omr_id: str, mode: str = "main", part_idx: int | None = None) -> dict | None:
         note = self.note_by_id.get(omr_id)
         if note is None:
             return None
-        score_note_index = note.get("scoreNoteIndex")
+        score_note_index = note.get("scoreNoteIndex") if mode == "main" else note.get("partScoreNoteIndex")
         if score_note_index is None:
-            raise ValueError(f"No MuseScore scoreNoteIndex for {omr_id}; tagged MusicXML did not map this note")
+            raise ValueError(f"No MuseScore note index for {omr_id} in mode={mode}")
+        if mode == "part" and part_idx is not None and note.get("partIdx") != part_idx:
+            raise ValueError(
+                f"Clicked note belongs to part {note.get('partIdx')}, but viewer is set to part {part_idx}"
+            )
         with self.lock:
             self.sequence += 1
             selector = {
                 "scoreNoteIndex": score_note_index,
                 "omrId": omr_id,
+                "mode": mode,
+                "partIdx": part_idx,
             }
             selector["sequence"] = self.sequence
             self.selector = selector
@@ -52,12 +67,49 @@ class BridgeState:
             }
             return selector
 
-    def next_selector(self, last_sequence: int) -> dict:
+    def set_command(self, name: str) -> dict:
+        with self.lock:
+            self.command_sequence += 1
+            self.command = {
+                "sequence": self.command_sequence,
+                "name": name,
+            }
+            return self.command
+
+    def update_score_state(
+        self,
+        score_path: str,
+        note_count: int,
+        score_mode: str,
+        current_part_idx: int | None,
+        current_part_name: str,
+        part_names: list[str],
+    ) -> None:
+        with self.lock:
+            if current_part_idx is None and score_mode == "part" and current_part_name:
+                try:
+                    current_part_idx = self.part_names.index(current_part_name)
+                except ValueError:
+                    current_part_idx = None
+            self.score_path = score_path
+            self.note_count = note_count
+            self.score_mode = score_mode
+            self.current_part_idx = current_part_idx
+            self.current_part_name = current_part_name
+            if part_names:
+                self.part_names = part_names
+            self.last_poll = time.time()
+
+    def next_selector(self, last_sequence: int, last_command_sequence: int = -1) -> dict:
         with self.lock:
             self.last_poll = time.time()
-            if self.selector is None or self.sequence <= last_sequence:
-                return {"selector": None}
-            return {"selector": self.selector}
+            selector = None
+            command = None
+            if self.selector is not None and self.sequence > last_sequence:
+                selector = self.selector
+            if self.command is not None and self.command_sequence > last_command_sequence:
+                command = self.command
+            return {"selector": selector, "command": command}
 
     def ack(self, sequence: str, ok: bool, message: str) -> None:
         with self.lock:
@@ -72,8 +124,13 @@ class BridgeState:
         with self.lock:
             return {
                 "sequence": self.sequence,
+                "commandSequence": self.command_sequence,
                 "scorePath": self.score_path,
                 "noteCount": self.note_count,
+                "scoreMode": self.score_mode,
+                "currentPartIdx": self.current_part_idx,
+                "currentPartName": self.current_part_name,
+                "partNames": self.part_names,
                 "musescoreSeenSecondsAgo": None
                 if self.last_poll == 0
                 else round(time.time() - self.last_poll, 2),
@@ -225,6 +282,23 @@ def build_score_note_map(score_elements: list[dict]) -> dict[str, dict]:
     )
     for score_note_index, row in enumerate(scan_rows):
         row["scoreNoteIndex"] = score_note_index
+    part_rows: dict[int, list[dict]] = {}
+    for row in all_note_rows:
+        part_rows.setdefault(int(row.get("partIdx") or 0), []).append(row)
+    for part_idx, rows_for_part in part_rows.items():
+        min_staff_idx = min(int(row.get("staffIdx") or 0) for row in rows_for_part)
+        sorted_part_rows = sorted(
+            rows_for_part,
+            key=lambda row: (
+                int(row.get("staffIdx") or 0) - min_staff_idx,
+                int(row.get("voiceIdx") or 0),
+                int(row.get("measureIdx") or 0),
+                float(row.get("beat") or 0),
+                row.get("_elementOrder", 0),
+            ),
+        )
+        for part_score_note_index, row in enumerate(sorted_part_rows):
+            row["partScoreNoteIndex"] = part_score_note_index
     for row in rows.values():
         row.pop("_elementOrder", None)
     return rows
@@ -235,6 +309,11 @@ def attach_score_note_indices(root_dir: Path, manifest: dict, notes: list[dict],
     if not tagged_path.is_file():
         raise FileNotFoundError(f"Tagged MusicXML not found: {tagged_path}")
     score_elements = run_score_elements(musescore, tagged_path)
+    if not manifest.get("parts"):
+        manifest["parts"] = [
+            {"partIdx": idx, "name": str(part.get("name") or part.get("partName") or f"Part {idx + 1}")}
+            for idx, part in enumerate(score_elements)
+        ]
     id_map = build_score_note_map(score_elements)
     missing = []
     for note in notes:
@@ -244,6 +323,11 @@ def attach_score_note_indices(root_dir: Path, manifest: dict, notes: list[dict],
             missing.append(omr_id)
             continue
         note.update(mapped)
+        if note.get("partIdx") is not None and note.get("partName") is None:
+            part_idx = int(note.get("partIdx") or 0)
+            parts = manifest.get("parts", [])
+            if 0 <= part_idx < len(parts):
+                note["partName"] = parts[part_idx].get("name") or parts[part_idx].get("partName")
     if missing:
         print(f"[Viewer] Warning: {len(missing)} clickable notes have no MuseScore scoreNoteIndex")
     notes[:] = [note for note in notes if note.get("scoreNoteIndex") is not None]
@@ -266,17 +350,29 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/select":
                 params = parse_qs(parsed.query)
                 omr_id = params.get("omrId", [""])[0]
-                selector = STATE.set_note(omr_id)
+                mode = params.get("mode", ["main"])[0]
+                part_idx_text = params.get("partIdx", [""])[0]
+                part_idx = None
+                if part_idx_text != "":
+                    part_idx = int(part_idx_text)
+                selector = STATE.set_note(omr_id, mode=mode, part_idx=part_idx)
                 if selector is None:
                     self.send_json({"ok": False, "message": "Unknown omrId"})
                 else:
                     self.send_json({"ok": True, "selector": selector})
+            elif parsed.path == "/api/play-pause":
+                command = STATE.set_command("playPause")
+                self.send_json({"ok": True, "command": command})
+            elif parsed.path == "/api/open-parts":
+                command = STATE.set_command("openParts")
+                self.send_json({"ok": True, "command": command})
             elif parsed.path == "/api/status":
                 self.send_json(STATE.status())
             elif parsed.path == "/next":
                 params = parse_qs(parsed.query)
                 last_sequence = int(params.get("lastSequence", ["-1"])[0])
-                self.send_json(STATE.next_selector(last_sequence))
+                last_command_sequence = int(params.get("lastCommandSequence", ["-1"])[0])
+                self.send_json(STATE.next_selector(last_sequence, last_command_sequence))
             elif parsed.path == "/selected":
                 params = parse_qs(parsed.query)
                 sequence = params.get("sequence", [""])[0]
@@ -286,13 +382,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
             elif parsed.path == "/register":
                 params = parse_qs(parsed.query)
-                with STATE.lock:
-                    STATE.score_path = params.get("scorePath", [""])[0]
+                try:
+                    note_count = int(params.get("noteCount", ["0"])[0])
+                except ValueError:
+                    note_count = 0
+                current_part_idx = None
+                current_part_idx_text = params.get("currentPartIdx", [""])[0]
+                if current_part_idx_text != "":
                     try:
-                        STATE.note_count = int(params.get("noteCount", ["0"])[0])
+                        current_part_idx = int(current_part_idx_text)
                     except ValueError:
-                        STATE.note_count = 0
-                    STATE.last_poll = time.time()
+                        current_part_idx = None
+                part_names_text = params.get("partNames", [""])[0]
+                part_names = [name for name in part_names_text.split("|") if name]
+                STATE.update_score_state(
+                    score_path=params.get("scorePath", [""])[0],
+                    note_count=note_count,
+                    score_mode=params.get("scoreMode", ["unknown"])[0],
+                    current_part_idx=current_part_idx,
+                    current_part_name=params.get("currentPartName", [""])[0],
+                    part_names=part_names,
+                )
                 self.send_text("ok")
             elif parsed.path.startswith("/files/"):
                 rel = unquote(parsed.path[len("/files/"):])
@@ -367,6 +477,26 @@ def render_viewer() -> str:
       padding: 8px 14px; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
     #detailText { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px Consolas, monospace; max-height: 150px; overflow: auto; }
     #copyBtn { padding: 5px 9px; }
+    #modeSelect { max-width: 160px; padding: 5px 7px; }
+    #modeDisplay { display: inline-block; min-width: 110px; max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; padding: 5px 7px; border: 1px solid #c7ced8; background: #f4f6f8; color: #30363d; }
+    #autoListenLabel { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+    #autoListenLabel input { width: auto; margin: 0; }
+    #modeWarning { display: none; color: #c62828; font-weight: 600; white-space: nowrap; }
+    #partsNotice { display: none; position: fixed; right: 18px; top: 62px; z-index: 30; width: min(420px, calc(100vw - 36px));
+      background: #fff; border: 1px solid #b8c2cf; box-shadow: 0 3px 18px rgba(0,0,0,.22); padding: 12px 14px; }
+    #partsNotice strong { display: block; margin-bottom: 6px; }
+    #partsNotice p { margin: 0 0 10px; line-height: 1.35; }
+    #partsNotice button { padding: 5px 9px; }
+    #helpModal { display: none; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35); }
+    #helpDialog { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(760px, calc(100vw - 36px));
+      max-height: min(760px, calc(100vh - 36px)); overflow: auto; background: #fff; border: 1px solid #aeb7c2;
+      box-shadow: 0 6px 28px rgba(0,0,0,.28); padding: 18px 20px; }
+    #helpDialog h2 { margin: 0 0 12px; font-size: 20px; }
+    #helpDialog h3 { margin: 18px 0 8px; font-size: 15px; }
+    #helpDialog p, #helpDialog li { line-height: 1.45; }
+    #helpDialog code { background: #eef2f6; padding: 1px 4px; }
+    #helpDialog .helpActions { display: flex; justify-content: flex-end; margin-top: 14px; }
     #pages { width: min(1100px, calc(100vw - 28px)); margin: 14px auto 40px; }
     .page { position: relative; margin: 0 auto 18px; background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.22); }
     .page img { display: block; width: 100%; height: auto; }
@@ -381,7 +511,39 @@ def render_viewer() -> str:
     <strong>GrandOMR Viewer</strong>
     <label>Page <input id="pageInput" type="number" min="1" value="1"></label>
     <button id="goBtn">Go</button>
+    <select id="modeSelect"></select>
+    <span id="modeDisplay">Main score</span>
+    <label id="autoListenLabel"><input id="autoListen" type="checkbox" checked> Auto listen</label>
+    <span id="modeWarning">Viewer part does not match the active MuseScore tab.</span>
+    <button id="partsBtn">Parts</button>
+    <button id="playPauseBtn">Play/Pause</button>
+    <button id="helpBtn">Help</button>
     <span id="status">Loading</span>
+  </div>
+  <div id="partsNotice">
+    <strong>Open a part in MuseScore</strong>
+    <p>The MuseScore Parts window should be open now. If you see it, choose the part you want to open. If nothing appeared, click the main score in MuseScore first, then open Parts manually and choose a part. This message will close automatically once a new part tab is detected.</p>
+    <button id="closeNoticeBtn">Close</button>
+  </div>
+  <div id="helpModal">
+    <div id="helpDialog">
+      <h2>GrandOMR Viewer Help</h2>
+      <p>This page is not a standalone MuseScore replacement. It works together with the MusicXML generated by GrandOMR and the <code>GrandOMR Plugin</code> running inside MuseScore.</p>
+      <h3>Basic usage</h3>
+      <ol>
+        <li>Run GrandOMR with <code>--plugin-output</code> so it writes a plugin bundle containing the MusicXML used by the plugin, page images, and note mapping metadata.</li>
+        <li>Start this viewer with <code>python grandomr_viewer.py &lt;plugin-output-folder&gt;</code>. If MuseScore is not in <code>PATH</code>, pass <code>--musescore "&lt;path-to-MuseScore4.exe&gt;"</code>.</li>
+        <li>Open the GrandOMR MusicXML written by the <code>-o</code> option in MuseScore. Do not open the MusicXML inside the plugin bundle.</li>
+        <li>In MuseScore, enable and run <code>GrandOMR Plugin</code>. Wait until this page shows <code>MuseScore: Connected</code>; note selection and playback controls should only be used after that.</li>
+        <li>Once connected, click a note box in this page to select the matching note in MuseScore.</li>
+      </ol>
+      <h3>Part tab selection</h3>
+      <p>The <code>Parts</code> button asks MuseScore to open its Parts window. If the window appears, choose the part you want MuseScore to open. If nothing appears, click the main score in MuseScore first, then open Parts manually and choose a part.</p>
+      <p>When MuseScore is focused on a Part tab, clicks in this viewer are matched against that Part tab rather than the full score. Playback also follows the active MuseScore tab, so playing from a Part tab plays that Part.</p>
+      <p><code>Auto listen</code> is recommended. It watches which score or Part tab MuseScore is currently showing and updates this page automatically.</p>
+      <p>If you turn off <code>Auto listen</code>, changing the Part in this page does not switch MuseScore to that Part. You must also switch MuseScore to the same Part tab yourself. Keep the manual selection here aligned with the active MuseScore tab, otherwise note selection may target the wrong note.</p>
+      <div class="helpActions"><button id="closeHelpBtn">Close</button></div>
+    </div>
   </div>
   <div id="detailPanel">
     <pre id="detailText">Click a note to show details.</pre>
@@ -392,8 +554,16 @@ def render_viewer() -> str:
     let notes = [];
     let selectedSeq = null;
     let debugMode = false;
+    let currentMode = { type: 'main', partIdx: null };
+    let partsNoticeActive = false;
     const statusEl = document.getElementById('status');
     const pagesEl = document.getElementById('pages');
+    const modeSelect = document.getElementById('modeSelect');
+    const modeDisplay = document.getElementById('modeDisplay');
+    const autoListenEl = document.getElementById('autoListen');
+    const modeWarning = document.getElementById('modeWarning');
+    const partsNotice = document.getElementById('partsNotice');
+    const helpModal = document.getElementById('helpModal');
     const detailPanel = document.getElementById('detailPanel');
     const detailText = document.getElementById('detailText');
     let lastDetail = '';
@@ -408,9 +578,121 @@ def render_viewer() -> str:
       notes = data.notes;
       debugMode = Boolean(data.debug);
       detailPanel.style.display = debugMode ? 'grid' : 'none';
+      populateModeSelect(data.manifest.parts || inferParts());
       renderPages(data.manifest.pages);
       statusEl.textContent = `Loaded ${notes.length} notes`;
       setInterval(refreshStatus, 700);
+    }
+
+    function inferParts() {
+      const parts = new Map();
+      for (const note of notes) {
+        if (note.partIdx !== undefined && note.partIdx !== null) {
+          parts.set(Number(note.partIdx), note.partName || `Part ${Number(note.partIdx) + 1}`);
+        }
+      }
+      return [...parts.entries()].sort((a, b) => a[0] - b[0]).map(([partIdx, name]) => ({ partIdx, name }));
+    }
+
+    function populateModeSelect(parts) {
+      const previous = modeSelect.value || 'main';
+      modeSelect.innerHTML = '';
+      const mainOpt = document.createElement('option');
+      mainOpt.value = 'main';
+      mainOpt.textContent = 'Main score';
+      modeSelect.appendChild(mainOpt);
+      for (const part of parts) {
+        const partIdx = Number(part.partIdx ?? part.index ?? modeSelect.options.length - 1);
+        const opt = document.createElement('option');
+        opt.value = `part:${partIdx}`;
+        opt.textContent = part.name || part.partName || `Part ${partIdx + 1}`;
+        modeSelect.appendChild(opt);
+      }
+      if ([...modeSelect.options].some(opt => opt.value === previous)) {
+        modeSelect.value = previous;
+      }
+      setModeFromValue(modeSelect.value);
+      updateModeControls();
+    }
+
+    function syncPartOptions(partNames) {
+      if (!Array.isArray(partNames) || partNames.length === 0) return;
+      for (let i = 0; i < partNames.length; i++) {
+        let opt = modeSelect.querySelector(`option[value="part:${i}"]`);
+        if (!opt) {
+          opt = document.createElement('option');
+          opt.value = `part:${i}`;
+          modeSelect.appendChild(opt);
+        }
+        opt.textContent = partNames[i] || `Part ${i + 1}`;
+      }
+      updateModeControls();
+    }
+
+    function setModeFromValue(value) {
+      if (value === 'main') {
+        currentMode = { type: 'main', partIdx: null };
+      } else if (value.startsWith('part:')) {
+        currentMode = { type: 'part', partIdx: Number(value.slice(5)) };
+      }
+      updateModeControls();
+    }
+
+    function modeLabelFromValue(value) {
+      for (const opt of modeSelect.options) {
+        if (opt.value === value) return opt.textContent;
+      }
+      return value;
+    }
+
+    function currentModeValue() {
+      return currentMode.type === 'main' ? 'main' : `part:${currentMode.partIdx}`;
+    }
+
+    function scoreModeValue(status) {
+      if (status.scoreMode === 'part' && status.currentPartIdx !== null && status.currentPartIdx !== undefined) {
+        return `part:${status.currentPartIdx}`;
+      }
+      if (status.scoreMode === 'main') return 'main';
+      return 'unknown';
+    }
+
+    function updateModeControls() {
+      const auto = autoListenEl.checked;
+      modeSelect.style.display = auto ? 'none' : '';
+      modeDisplay.style.display = auto ? '' : 'none';
+      modeDisplay.textContent = modeLabelFromValue(currentModeValue());
+      if (auto) modeWarning.style.display = 'none';
+    }
+
+    function updateModeSelectFromScore(status) {
+      if (!autoListenEl.checked) return;
+      if (status.scoreMode === 'part' && status.currentPartIdx !== null && status.currentPartIdx !== undefined) {
+        const value = `part:${status.currentPartIdx}`;
+        if (modeSelect.value !== value) {
+          modeSelect.value = value;
+          setModeFromValue(value);
+        }
+        if (partsNoticeActive) hidePartsNotice();
+      } else if (status.scoreMode === 'main') {
+        if (modeSelect.value !== 'main') {
+          modeSelect.value = 'main';
+          setModeFromValue('main');
+        }
+      }
+    }
+
+    function updateModeWarning(status) {
+      if (autoListenEl.checked) {
+        modeWarning.style.display = 'none';
+        return;
+      }
+      const actual = scoreModeValue(status);
+      if (actual !== 'unknown' && actual !== currentModeValue()) {
+        modeWarning.style.display = '';
+      } else {
+        modeWarning.style.display = 'none';
+      }
     }
 
     function renderPages(pages) {
@@ -449,6 +731,8 @@ def render_viewer() -> str:
       return {
         omrId: note.omrId,
         scoreNoteIndex: note.scoreNoteIndex,
+        partScoreNoteIndex: note.partScoreNoteIndex,
+        partIdx: note.partIdx,
         pageIndex: note.pageIndex,
         staffIdx: note.staffIdx,
         voiceIdx: note.voiceIdx,
@@ -475,7 +759,9 @@ def render_viewer() -> str:
       document.querySelectorAll('.note').forEach(n => n.classList.remove('pending', 'selected'));
       const el = document.querySelector(`[data-omr-id="${omrId}"]`);
       if (el) el.classList.add('pending');
-      const res = await fetch('/api/select?omrId=' + encodeURIComponent(omrId));
+      const params = new URLSearchParams({ omrId, mode: currentMode.type });
+      if (currentMode.partIdx !== null && currentMode.partIdx !== undefined) params.set('partIdx', String(currentMode.partIdx));
+      const res = await fetch('/api/select?' + params.toString());
       const data = await res.json();
       if (!data.ok) {
         alert(data.message || 'Selection failed');
@@ -485,11 +771,63 @@ def render_viewer() -> str:
       statusEl.textContent = `Sent ${omrId}`;
     }
 
+    async function playPause() {
+      const res = await fetch('/api/play-pause', { method: 'GET' });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.message || 'Playback command failed');
+        return;
+      }
+      statusEl.textContent = 'Sent play/pause';
+    }
+
+    async function openParts() {
+      const res = await fetch('/api/open-parts', { method: 'GET' });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.message || 'Open Parts command failed');
+        return;
+      }
+      showPartsNotice();
+    }
+
+    function showPartsNotice() {
+      partsNoticeActive = true;
+      partsNotice.style.display = 'block';
+    }
+
+    function hidePartsNotice() {
+      partsNoticeActive = false;
+      partsNotice.style.display = 'none';
+    }
+
+    function connectionSummary(seen) {
+      if (seen === null || seen === undefined) {
+        return { state: 'Disconnected', seenText: 'never seen' };
+      }
+      const seconds = Number(seen);
+      if (Number.isNaN(seconds)) {
+        return { state: 'Disconnected', seenText: 'seen unknown' };
+      }
+      if (seconds < 2) {
+        return { state: 'Connected', seenText: `seen ${seconds}s ago` };
+      }
+      if (seconds <= 10) {
+        return { state: 'Stale', seenText: `seen ${seconds}s ago` };
+      }
+      return { state: 'Disconnected', seenText: `seen ${seconds}s ago` };
+    }
+
     async function refreshStatus() {
       const res = await fetch('/api/status');
       const data = await res.json();
       const seen = data.musescoreSeenSecondsAgo;
-      statusEl.textContent = `MuseScore ${seen === null ? 'not seen' : 'seen ' + seen + 's ago'}; notes scanned ${data.noteCount}`;
+      syncPartOptions(data.partNames);
+      updateModeSelectFromScore(data);
+      updateModeWarning(data);
+      const scoreLabel = data.scoreMode === 'part' ? `Part: ${data.currentPartName || data.currentPartIdx}` : data.scoreMode || 'unknown';
+      const conn = connectionSummary(seen);
+      statusEl.textContent = `MuseScore: ${conn.state}, ${conn.seenText}; ${scoreLabel}; notes scanned ${data.noteCount}`;
       if (selectedSeq && data.selected && data.selected[selectedSeq]) {
         const ack = data.selected[selectedSeq];
         if (!ack.pending) {
@@ -510,6 +848,16 @@ def render_viewer() -> str:
       const el = document.getElementById(`page-${page}`);
       if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'});
     });
+    modeSelect.addEventListener('change', () => setModeFromValue(modeSelect.value));
+    autoListenEl.addEventListener('change', updateModeControls);
+    document.getElementById('partsBtn').addEventListener('click', openParts);
+    document.getElementById('playPauseBtn').addEventListener('click', playPause);
+    document.getElementById('helpBtn').addEventListener('click', () => { helpModal.style.display = 'block'; });
+    document.getElementById('closeHelpBtn').addEventListener('click', () => { helpModal.style.display = 'none'; });
+    helpModal.addEventListener('click', ev => {
+      if (ev.target === helpModal) helpModal.style.display = 'none';
+    });
+    document.getElementById('closeNoticeBtn').addEventListener('click', hidePartsNotice);
     document.getElementById('copyBtn').addEventListener('click', async () => {
       if (!lastDetail) return;
       try {
