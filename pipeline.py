@@ -2552,25 +2552,31 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
             results.append((xml_string, sys_names, plugin_page))
 
         # ── Align smaller systems to the reference (most-stave) system ──
+        # Only when the smaller system has no recognised instrument names.
         if len(set(sys_sizes)) > 1:
             max_sz    = max(sys_sizes)
             ref_i     = sys_sizes.index(max_sz)
             ref_xml   = results[ref_i][0]
             ref_sigs  = _extract_part_signatures(ref_xml)
             for i, (xml_str, sys_nm, pp) in enumerate(results):
-                if sys_sizes[i] < max_sz:
-                    det_sigs = _extract_part_signatures(xml_str)
-                    asgn, miss = _align_signatures_dp(det_sigs, ref_sigs)
-                    if miss:
-                        print(f"[Align] sys{i}: {sys_sizes[i]} staves, "
-                              f"missing ref positions {miss} → inserting empty parts")
-                        xml_str = _realign_xml_to_reference(xml_str, asgn, miss, ref_xml)
-                        new_nm  = [None] * max_sz
-                        for j, rp in enumerate(asgn):
-                            if j < len(sys_nm):
-                                new_nm[rp] = sys_nm[j]
-                        sys_nm = [n or f'Part {k + 1}' for k, n in enumerate(new_nm)]
-                    results[i] = (xml_str, sys_nm, pp)
+                if sys_sizes[i] >= max_sz:
+                    continue
+                has_names = sys_nm and any(
+                    _instrument_base(n) in INSTRUMENT_MIDI for n in sys_nm)
+                if has_names:
+                    continue
+                det_sigs = _extract_part_signatures(xml_str)
+                asgn, miss = _align_signatures_dp(det_sigs, ref_sigs)
+                if miss:
+                    print(f"[Align] sys{i}: {sys_sizes[i]} staves, "
+                          f"missing ref positions {miss} → inserting empty parts")
+                    xml_str = _realign_xml_to_reference(xml_str, asgn, miss, ref_xml)
+                    new_nm  = [None] * max_sz
+                    for j, rp in enumerate(asgn):
+                        if j < len(sys_nm):
+                            new_nm[rp] = sys_nm[j]
+                    sys_nm = [n or f'Part {k + 1}' for k, n in enumerate(new_nm)]
+                results[i] = (xml_str, sys_nm, pp)
 
         if collect_plugin_data:
             if not any(plugin_page is not None for _xml, _names, plugin_page in results):
