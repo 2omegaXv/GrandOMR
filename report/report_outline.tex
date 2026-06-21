@@ -365,9 +365,43 @@ Tokens that mix $f$ and $p$ (such as \texttt{fp} or \texttt{pf}) and tokens of t
 An OCR pre-scan identifies regions containing expression words (e.g.\ \textit{cresc}, \textit{dim}, \textit{poco}) and suppresses YOLO detections within those regions, avoiding false matches on the initial letters of Italian expression markings.
 Detected dynamics are finally injected as \texttt{<direction>} elements at the correct measure and note position by mapping detection pixel coordinates back to HOMR coordinate space and consulting the detected barline positions.
 
-\subsection{Interactive Playback (Stage 5)}
+\subsection{Interactive Localization and MuseScore Plugin (Stage 5)}
 
-% [留空]
+The MusicXML file is only the final visible product of a much richer recognition pipeline.
+During recognition, GrandOMR has already computed staff locations, notehead boxes, TrOMR token positions, part assignments, and intermediate symbolic structures.
+If these signals are discarded after MusicXML generation, we lose information that is useful for inspecting large orchestral scores.
+There is also a practical gap between the scanned page and the editable score opened in MuseScore: both represent the same music, but MuseScore re-engraves the MusicXML using its own layout engine, so a note in the scan may appear at a different page position, system break, or spacing in MuseScore.
+For orchestral pages with many staves, manually finding the corresponding MuseScore note is slow and error-prone.
+
+We therefore implement a plugin-oriented interaction layer around GrandOMR.
+The user can click a note on the original page image in a browser viewer, and the MuseScore plugin automatically selects the corresponding note in the opened score.
+Once the note is selected, the user can use MuseScore's normal editing and playback tools, for example starting playback from that location.
+To the best of our knowledge, this is the first plugin that supports note-level localization from a note in the original score image to the corresponding note in MuseScore.
+We also add convenience features such as browser-side playback control and part-level note localization.
+A demonstration video of the plugin is included in the supplementary materials.
+The core technical problem is preserving the connection from image evidence, to generated XML notes, to live MuseScore note objects.
+
+\paragraph{Image note to MusicXML note.}
+GrandOMR inherits HOMR's hybrid architecture: visual geometry such as staff lines and noteheads is extracted by a segmentation network, while each staff is decoded by a TrOMR-style transformer into symbolic note tokens that are later written as MusicXML notes.
+The TrOMR stage is end-to-end, so it does not directly provide a correspondence between HOMR's detected geometric objects and its output tokens.
+The missing link is therefore the connection between symbolic notes and their locations in the original image.
+
+We use the attention-derived pixel-level focus point attached to each TrOMR note token as a rough localization cue, and match it to HOMR's detected notehead boxes on the same staff.
+Single notes can be matched directly by distance.
+Chords require one extra step: because several notes share the same horizontal position, we first bind the visual chord group and then reassign individual chord tones by the actual $y$-coordinates of their notehead bounding boxes, using pitch as an additional cue when available.
+In practice, we found this localization strategy to be reliable and robust enough for interactive use.
+
+\paragraph{MusicXML note to MuseScore note.}
+The second mapping links the generated MusicXML notes to the note objects visible inside MuseScore.
+Ideally, we would identify MuseScore notes using the same note ids that appear in MusicXML.
+However, after MuseScore imports a MusicXML file, those ids are not reliably exposed through the plugin API.
+Another possibility is structural matching, for example locating a note by its part, measure, position inside the measure, and pitch.
+This is also brittle, because it would require us to reproduce MuseScore's own import and engraving decisions, including how it orders notes, groups chords, and handles voices.
+
+Our solution is to create a temporary tagged MusicXML file.
+For every clickable note, we inject a hidden lyric as a marker carrying a pseudo id.
+We then use MuseScore's command-line interface to scan this tagged file automatically, without requiring the user to open it manually.
+By finding the marker in MuseScore's scan result, we can locate the corresponding MuseScore note directly, without reproducing MuseScore's layout or import logic ourselves.
 
 
 % ─────────────────────────────────────────────────────────────────────────────
