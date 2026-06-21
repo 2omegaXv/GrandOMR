@@ -2039,17 +2039,100 @@ def _gap_based_system_split(staffs_sorted, avg_staff_h):
     return result if result else [list(staffs_sorted)]
 
 
-def _detect_system_breaks(staffs_sorted, brace_dots):
-    """Split sorted staves into system groups using large bracket detection.
-    Each system starts with a tall bracket/brace on the left that spans all
-    its staves.  We find these tall bounding-boxes and assign staves to them.
-    Falls back to gap-based detection for piano/chamber scores without tall brackets."""
+def _left_margin_cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
+    """Detect system boundaries via left-margin connected-component analysis.
+
+    Takes the union of all SegNet segmentation masks, crops to the left margin
+    (up to the rightmost initial barline + small buffer), finds connected
+    components taller than one staff height, merges nearby intervals, and
+    returns a list of (y_top, y_bot) tuples in HOMR coordinates."""
+    h_hom, w_hom = predictions.original.shape[:2]
+
+    median_min_x = float(np.median([s.min_x for s in staffs_sorted]))
+    valid_staffs = [s for s in staffs_sorted if s.min_x <= median_min_x * 3]
+    if not valid_staffs:
+        return []
+    staff_left_max = max(s.min_x for s in valid_staffs)
+
+    union_hom = (
+        predictions.staff |
+        predictions.clefs_keys |
+        predictions.notehead |
+        predictions.stems_rest |
+        predictions.symbols
+    ).astype(np.uint8) * 255
+
+    margin_hom = int(staff_left_max + avg_staff_h * 0.3)
+    union_cropped = union_hom[:, :margin_hom]
+
+    num_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(
+        union_cropped, connectivity=8)
+
+    min_h = avg_staff_h
+    tall_intervals = []
+    for i in range(1, num_labels):
+        h_ = stats[i, cv2.CC_STAT_HEIGHT]
+        y_top = stats[i, cv2.CC_STAT_TOP]
+        if h_ >= min_h:
+            tall_intervals.append((y_top, y_top + h_))
+
+    if not tall_intervals:
+        return []
+
+    gap_tol = avg_staff_h
+    tall_intervals.sort()
+    merged = []
+    for top, bot in tall_intervals:
+        if merged and top <= merged[-1][1] + gap_tol:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], bot))
+        else:
+            merged.append((top, bot))
+
+    return merged
+
+
+def _detect_system_breaks(staffs_sorted, brace_dots, predictions=None):
+    """Split sorted staves into system groups.
+
+    Primary method: left-margin connected-component analysis on the union of
+    all SegNet segmentation masks (requires ``predictions``).
+    Falls back to brace/bracket detection then gap-based split when CC
+    detection is unavailable or yields only one interval."""
     if len(staffs_sorted) <= 1:
         return [list(staffs_sorted)]
 
     avg_staff_h = float(np.median([s.max_y - s.min_y for s in staffs_sorted]))
-    min_bracket_h = avg_staff_h * 4
 
+    def _assign(merged_intervals):
+        margin = avg_staff_h
+        systems = [[] for _ in merged_intervals]
+        for staff in staffs_sorted:
+            cy = (staff.min_y + staff.max_y) / 2
+            assigned = False
+            for bi, (top, bot) in enumerate(merged_intervals):
+                if top - margin <= cy <= bot + margin:
+                    systems[bi].append(staff)
+                    assigned = True
+                    break
+            if not assigned:
+                best = min(range(len(merged_intervals)),
+                           key=lambda i: abs(cy - (merged_intervals[i][0]
+                                                    + merged_intervals[i][1]) / 2))
+                systems[best].append(staff)
+        return [s for s in systems if s]
+
+    # ── Primary: left-margin CC detection ──
+    if predictions is not None:
+        cc_intervals = _left_margin_cc_system_breaks(
+            staffs_sorted, predictions, avg_staff_h)
+        if len(cc_intervals) >= 1:
+            systems = _assign(cc_intervals)
+            if systems:
+                print(f"[SystemBreak] CC-based: {[len(s) for s in systems]} staves per system")
+                return systems
+
+    # ── Fallback A: brace/bracket bounding-boxes (original logic) ──
+    min_bracket_h = avg_staff_h * 4
     candidates = []
     for bd in brace_dots:
         h = bd.size[1]
@@ -2059,51 +2142,26 @@ def _detect_system_breaks(staffs_sorted, brace_dots):
             y_bot = bd.center[1] + h / 2
             candidates.append((y_top, y_bot))
 
-    if not candidates:
-        # No tall orchestral brackets detected — try gap-based split (piano/chamber scores).
-        result = _gap_based_system_split(staffs_sorted, avg_staff_h)
-        if len(result) > 1:
-            print(f"[SystemBreak] Gap-based split: {[len(s) for s in result]} staves per system")
-        return result
+    if candidates:
+        candidates.sort(key=lambda b: b[0])
+        merged = [list(candidates[0])]
+        for top, bot in candidates[1:]:
+            if top < merged[-1][1]:
+                merged[-1][0] = min(merged[-1][0], top)
+                merged[-1][1] = max(merged[-1][1], bot)
+            else:
+                merged.append([top, bot])
+        if len(merged) > 1:
+            systems = _assign(merged)
+            if systems:
+                print(f"[SystemBreak] Bracket-based: {[len(s) for s in systems]} staves per system")
+                return systems
 
-    candidates.sort(key=lambda b: b[0])
-
-    merged = [list(candidates[0])]
-    for top, bot in candidates[1:]:
-        if top < merged[-1][1]:
-            merged[-1][0] = min(merged[-1][0], top)
-            merged[-1][1] = max(merged[-1][1], bot)
-        else:
-            merged.append([top, bot])
-
-    if len(merged) <= 1:
-        # Only one bracket region found — this page may still have multiple systems
-        # (e.g. an orchestral system followed by piano-solo systems with no tall bracket).
-        # Try gap-based split as a second opinion.
-        gap_result = _gap_based_system_split(staffs_sorted, avg_staff_h)
-        if len(gap_result) > 1:
-            print(f"[SystemBreak] Gap-based override (1 bracket): "
-                  f"{[len(s) for s in gap_result]} staves per system")
-            return gap_result
-        return [list(staffs_sorted)]
-
-    systems = [[] for _ in merged]
-    margin = avg_staff_h
-    for staff in staffs_sorted:
-        cy = (staff.min_y + staff.max_y) / 2
-        assigned = False
-        for bi, (top, bot) in enumerate(merged):
-            if top - margin <= cy <= bot + margin:
-                systems[bi].append(staff)
-                assigned = True
-                break
-        if not assigned:
-            best = min(range(len(merged)),
-                       key=lambda i: abs(cy - (merged[i][0] + merged[i][1]) / 2))
-            systems[best].append(staff)
-
-    systems = [s for s in systems if s]
-    return systems if systems else [list(staffs_sorted)]
+    # ── Fallback B: gap-based split ──
+    result = _gap_based_system_split(staffs_sorted, avg_staff_h)
+    if len(result) > 1:
+        print(f"[SystemBreak] Gap-based: {[len(s) for s in result]} staves per system")
+    return result
 
 
 _VLM_EXTRA_SYSTEM_PROMPT = """This is a CROPPED region from an orchestral music score, showing the LEFT MARGIN of one system (行).
@@ -2321,7 +2379,7 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     # ── Determine parts-per-system and group staves ──
     n_parts = len(part_names)
     staffs_sorted = sorted(staffs, key=lambda s: s.min_y)
-    system_groups = _detect_system_breaks(staffs_sorted, brace_dots)
+    system_groups = _detect_system_breaks(staffs_sorted, brace_dots, predictions)
     sys_sizes = [len(g) for g in system_groups]
 
     # Merge adjacent small systems that together equal the first system's staff count.
