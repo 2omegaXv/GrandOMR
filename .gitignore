@@ -68,3 +68,12 @@ tchai_p1.mscz
 PIPELINE_ALGORITHM.md
 commands.txt
 test/
+
+ds2_dense/
+dynamics_yolo_dataset/
+audiveris_dynamics_vis/
+runs/
+runs_dynamics/
+vlm_crop_check/
+
+*.tar.gz

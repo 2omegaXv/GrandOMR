@@ -62,26 +62,29 @@ def main():
         png_paths.append(png_path)
         print(f"  {png_path} ({img.size[0]}×{img.size[1]})")
 
-    # 2. Per-page recognition with cross-page name propagation
+    # 2. Per-page recognition with cross-page name and time-sig propagation
     page_xmls = []
     plugin_pages = []
     detected_names = None
+    ts_context = None
     for page_idx, png_path in enumerate(png_paths):
         xml_path = png_path.replace(".png", ".musicxml")
         if args.plugin_output:
-            _, names, page_plugin_pages, _xml_string = run_pipeline(
+            _, names, ts_context, page_plugin_pages, _xml_string = run_pipeline(
                 png_path, xml_path,
                 use_gpu=use_gpu, use_vlm=use_vlm,
                 part_names_override=detected_names,
                 collect_plugin_data=True,
                 page_index=page_idx,
+                ts_context=ts_context,
             )
             plugin_pages.extend(page_plugin_pages)
         else:
-            _, names = run_pipeline(
+            _, names, ts_context = run_pipeline(
                 png_path, xml_path,
                 use_gpu=use_gpu, use_vlm=use_vlm,
                 part_names_override=detected_names,
+                ts_context=ts_context,
             )
         if detected_names is None and names:
             detected_names = names
