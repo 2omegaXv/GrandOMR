@@ -154,6 +154,18 @@ VLM 返回 `Name:Key` 格式，将乐器名和移调调性分开：
 
 `_parse_instrument_key` 同时支持 `Name:Key`（VLM 格式）和 `Name in Key`（旧格式/显示格式）两种写法。
 
+### 乐器同义词规范化
+
+`_instrument_base` 在查询 INSTRUMENT_MIDI / ORCHESTRAL_ORDER 之前，先经过 `_INSTRUMENT_SYNONYMS` 做同义词折叠：
+
+| VLM/OCR 输出 | 规范化为 |
+|---|---|
+| Keyboard / Klavier / Pianoforte / Grand Piano | Piano |
+| Double Bass / String Bass / Bass | Contrabass |
+| French Horn | Horn |
+
+`INSTRUMENT_ABBREVS` 缩写字典同样收录了 `klav` / `klav.` / `klavier` / `keyboard` → Piano，确保德文缩写在 OCR 路径下也能正确映射。
+
 ### 移调处理
 
 #### 计算方式
@@ -180,13 +192,17 @@ _KEY_SEMITONES = {"C": 0, "D": 2, "Eb": 3, "E": 4, "F": 5, "G": 7, "A": 9, "Bb":
 
 ### System 检测与合并
 
-`_detect_system_breaks` 通过谱表间的垂直间距和括号位置来划分行（system）。
+`_detect_system_breaks` 将一页的谱表划分为若干行（system），采用三层优先级：
 
-后处理会合并被错误拆分的 system：当相邻的小组谱表数之和等于第一个 system 的谱表数时，自动合并。
+1. **左边距 CC 分析（主路径）**：取所有 SegNet 分割掩码的并集，裁切到最左侧初始小节线右侧一小段区域，对该窄条做连通域分析，保留高度超过一个谱表高度的连通域，合并间距小于一个谱表高度的区间，得到各 system 的 y 范围。适用于管弦乐和钢琴谱。
+2. **Fallback A — 括号/大括号检测**：在左边距 CC 分析失败时，改用 brace_dots 中高大括号的 bounding box 推断 system 边界（原始逻辑）。
+3. **Fallback B — 间距分析**：若无高大括号，检测谱表间 y 轴间距分布的最大相对跳变来切分 system（适用于钢琴/室内乐谱）。
+
+后处理会合并被错误拆分的 system：当相邻小组谱表数之和恰好等于第一个 system 的谱表数时，自动合并；若累积数不能整除，则保持各组独立（真正的小 system）。
 
 ```
-检测结果: [13, 9, 4]  →  合并为: [13, 13]
-                          ↑ 因为 9+4=13=第一组的大小
+检测结果: [13, 9, 4]  →  合并为: [13, 13]   ← 9+4=13
+检测结果: [13, 9, 5]  →  保持: [13, 9, 5]   ← 9+5≠13
 ```
 
 ### Multi-system 页面处理
