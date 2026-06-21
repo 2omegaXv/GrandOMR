@@ -101,6 +101,8 @@ INSTRUMENT_ABBREVS = {
     "englisch horn": "English Horn", "englisches horn": "English Horn",
     "arpa": "Harp", "harp": "Harp", "harfe": "Harp",
     "piano": "Piano", "pf": "Piano", "pf.": "Piano",
+    "klav": "Piano", "klav.": "Piano", "klavier": "Piano",
+    "keyboard": "Piano",
     "cel": "Celesta", "cel.": "Celesta", "celesta": "Celesta",
 }
 
@@ -213,6 +215,20 @@ def _parse_instrument_key(name: str):
     return name, None
 
 
+_INSTRUMENT_SYNONYMS = {
+    "Keyboard": "Piano",
+    "Klavier": "Piano",
+    "Pianoforte": "Piano",
+    "Grand Piano": "Piano",
+    "Forte Piano": "Piano",
+    "Double Bass": "Contrabass",
+    "String Bass": "Contrabass",
+    "Bass": "Contrabass",
+    "French Horn": "Horn",
+    "English Horn": "English Horn",
+}
+
+
 def _instrument_base(name: str) -> str:
     """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups.
     For shared-staff names like 'Bass Drum/Cymbals', use the primary (first) instrument.
@@ -220,6 +236,7 @@ def _instrument_base(name: str) -> str:
     base = _parse_instrument_key(name)[0]
     if "/" in base:
         base = base.split("/")[0].strip()
+    base = _INSTRUMENT_SYNONYMS.get(base, base)
     if base not in INSTRUMENT_MIDI:
         match = max((k for k in INSTRUMENT_MIDI if base.startswith(k)), key=len, default=None)
         if match:
@@ -928,7 +945,22 @@ def _match_override_to_detected(override: List[str], detected: List[str],
         matched = [override[i] for i in best_indices]
         print(f"[Override] Matched {best_name}/{N} by name, pitch={best_pitch:.1f}, bad={best_bad}, tacet: {dropped}")
         return matched
-    print(f"[Override] Poor match ({best_name}/{N}), using first {N} names")
+    # Poor name/pitch match — fall back to pitch-only best if available,
+    # otherwise pick the N override names whose bases most overlap with detected bases.
+    if part_pitches:
+        candidates.sort(key=lambda c: (c[2], -c[1]))
+        _, _, _, best_indices = candidates[0]
+        result = [override[i] for i in best_indices]
+        print(f"[Override] Poor name match ({best_name}/{N}), using pitch-best: {result}")
+        return result
+    # No pitch info: pick N names from override whose bases appear in detected_bases.
+    detected_base_set = set(detected_bases)
+    preferred = [i for i in range(M) if _instrument_base(override[i]) in detected_base_set]
+    if len(preferred) >= N:
+        result = [override[i] for i in preferred[:N]]
+        print(f"[Override] Poor name match ({best_name}/{N}), matched by base: {result}")
+        return result
+    print(f"[Override] Poor name match ({best_name}/{N}), using first {N} names")
     return override[:N]
 
 
@@ -1059,7 +1091,7 @@ _VLM_PROMPT_PASS1 = """This is a page from an orchestral music score.
 {ocr_hint}
 Look at each staff (a group of 5 horizontal lines) from top to bottom.
 Use the stave y-positions above to anchor each staff's location. For each staff, identify which instrument it belongs to based on the label on the left margin.
-Translate German abbreviations to English (Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Vl.=Violin, Va./Br.=Viola, Vc./Vcll.=Cello, B./Kb.=Contrabass, Ten.Hr.=Tenor Horn).
+Translate German abbreviations to English (Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcll.=Cello, B./Kb.=Contrabass, Ten.Hr.=Tenor Horn).
 For transposing instruments include the key only if explicitly written (e.g. "Clarinet in A"). Do NOT assume default keys.
 For each staff, write one line: "Staff N (y=...): InstrumentName — reason". No markdown, no bullet points."""
 
@@ -1076,7 +1108,7 @@ Use formal English instrument names. Append :KEY ONLY for transposing instrument
 - If two different labels clearly point to the SAME single staff (stacked beside one staff), join: e.g. "Trombone/Tuba".
 - "B" as a KEY means Bb; "B." or "Kb." as an INSTRUMENT means Contrabass.
 - CRITICAL: "in X" key labels at different y-positions apply only to the nearest staves.
-- German: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Beck./Bck.=Cymbals, Tamt./T.-t.=Tam-tam, Trgl.=Triangle, Ten.Hr.=Tenor Horn, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl./Vcll.=Cello, B./Kb./K-B./K.B.=Contrabass.
+- German: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Beck./Bck.=Cymbals, Tamt./T.-t.=Tam-tam, Trgl.=Triangle, Ten.Hr.=Tenor Horn, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl./Vcll.=Cello, B./Kb./K-B./K.B.=Contrabass.
 - Output ONLY instrument names. No explanations, no numbering, no extra text.
 There are exactly {n} staves. Output exactly {n} lines."""
 
@@ -1967,10 +1999,51 @@ def detect_double_barlines(staff, bar_line_boxes):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _gap_based_system_split(staffs_sorted, avg_staff_h):
+    """Fallback system split using y-gaps between staves.
+    Finds the natural break in the gap distribution (largest relative jump) to
+    separate within-system gaps from between-system gaps.  Used when no tall
+    orchestral brackets are detected (e.g. piano/chamber scores)."""
+    if len(staffs_sorted) <= 1:
+        return [list(staffs_sorted)]
+
+    gaps = [staffs_sorted[i + 1].min_y - staffs_sorted[i].max_y
+            for i in range(len(staffs_sorted) - 1)]
+    pos_gaps = [g for g in gaps if g > 0]
+    if not pos_gaps:
+        return [list(staffs_sorted)]
+
+    # Find the natural break between small (within-system) and large (between-system) gaps.
+    # Look for the largest relative jump in the sorted gap distribution.
+    sorted_g = sorted(pos_gaps)
+    best_ratio, best_i = 0.0, 0
+    for j in range(len(sorted_g) - 1):
+        if sorted_g[j] > 0:
+            ratio = sorted_g[j + 1] / sorted_g[j]
+            if ratio > best_ratio:
+                best_ratio, best_i = ratio, j
+    # Require at least 1.5× jump to avoid splitting on minor spacing variation.
+    if best_ratio < 1.5:
+        return [list(staffs_sorted)]
+    split_threshold = sorted_g[best_i + 1]
+    split_after = [i for i, g in enumerate(gaps) if g >= split_threshold]
+    if not split_after:
+        return [list(staffs_sorted)]
+
+    systems, start = [], 0
+    for i in split_after:
+        systems.append(list(staffs_sorted[start:i + 1]))
+        start = i + 1
+    systems.append(list(staffs_sorted[start:]))
+    result = [s for s in systems if s]
+    return result if result else [list(staffs_sorted)]
+
+
 def _detect_system_breaks(staffs_sorted, brace_dots):
     """Split sorted staves into system groups using large bracket detection.
     Each system starts with a tall bracket/brace on the left that spans all
-    its staves.  We find these tall bounding-boxes and assign staves to them."""
+    its staves.  We find these tall bounding-boxes and assign staves to them.
+    Falls back to gap-based detection for piano/chamber scores without tall brackets."""
     if len(staffs_sorted) <= 1:
         return [list(staffs_sorted)]
 
@@ -1987,7 +2060,11 @@ def _detect_system_breaks(staffs_sorted, brace_dots):
             candidates.append((y_top, y_bot))
 
     if not candidates:
-        return [list(staffs_sorted)]
+        # No tall orchestral brackets detected — try gap-based split (piano/chamber scores).
+        result = _gap_based_system_split(staffs_sorted, avg_staff_h)
+        if len(result) > 1:
+            print(f"[SystemBreak] Gap-based split: {[len(s) for s in result]} staves per system")
+        return result
 
     candidates.sort(key=lambda b: b[0])
 
@@ -2000,6 +2077,14 @@ def _detect_system_breaks(staffs_sorted, brace_dots):
             merged.append([top, bot])
 
     if len(merged) <= 1:
+        # Only one bracket region found — this page may still have multiple systems
+        # (e.g. an orchestral system followed by piano-solo systems with no tall bracket).
+        # Try gap-based split as a second opinion.
+        gap_result = _gap_based_system_split(staffs_sorted, avg_staff_h)
+        if len(gap_result) > 1:
+            print(f"[SystemBreak] Gap-based override (1 bracket): "
+                  f"{[len(s) for s in gap_result]} staves per system")
+            return gap_result
         return [list(staffs_sorted)]
 
     systems = [[] for _ in merged]
@@ -2025,7 +2110,7 @@ _VLM_EXTRA_SYSTEM_PROMPT = """This is a CROPPED region from an orchestral music 
 Read each instrument name or abbreviation from top to bottom.
 Map each to one of these standard names: {master_names}
 There are exactly {n} staves in this region. Output exactly {n} lines, one standard name per staff, from top to bottom. No numbering, no extra text.
-German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass."""
+German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass."""
 
 
 def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
@@ -2239,21 +2324,25 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     system_groups = _detect_system_breaks(staffs_sorted, brace_dots)
     sys_sizes = [len(g) for g in system_groups]
 
-    # Merge adjacent small systems that together equal the first system's staff count
+    # Merge adjacent small systems that together equal the first system's staff count.
+    # This re-joins systems that were incorrectly split by gap detection.
+    # If accumulated groups don't sum exactly to target, keep them as individual systems.
     if len(system_groups) > 1:
         target = len(system_groups[0])
         merged = [system_groups[0]]
         i = 1
         while i < len(system_groups):
-            acc = list(system_groups[i])
-            i += 1
-            while len(acc) < target and i < len(system_groups):
-                acc.extend(system_groups[i])
+            accumulated = []
+            acc_staves = []
+            while i < len(system_groups) and len(acc_staves) < target:
+                accumulated.append(system_groups[i])
+                acc_staves.extend(system_groups[i])
                 i += 1
-            if len(acc) == target:
-                merged.append(acc)
+            if len(acc_staves) == target:
+                merged.append(acc_staves)
             else:
-                merged.append(acc)
+                # Didn't reach target — these are genuinely smaller systems, keep separate.
+                merged.extend(accumulated)
         if [len(g) for g in merged] != sys_sizes:
             print(f"[HOMR] Merged split systems: {sys_sizes} → {[len(g) for g in merged]}")
             system_groups = merged
