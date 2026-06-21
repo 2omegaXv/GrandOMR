@@ -28,10 +28,11 @@
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 3: 跨声部后处理       │  Layer 0: 拍号推断（显式标记优先，跨页传播）
-│                             │  Layer 1: 拍号/调号多数投票对齐
-│                             │  Layer 2: 小节数统一
-│                             │  Layer 3: 时值修正（position tracking）
+│  Stage 3: 跨声部后处理       │  Layer 0:  拍号推断（双小节线分段 + VLM投票确认 + 跨页传播）
+│                             │  Layer 0b: 调号传播（双小节线感知 + 跨页继承与回溯修正）
+│                             │  Layer 1:  拍号/调号多数投票对齐
+│                             │  Layer 2:  小节数统一
+│                             │  Layer 3:  时值修正（position tracking）
 │                             │  + 记谱溢出修复 / 三连音标记 / 双dot清理
 └─────────────┬───────────────┘
               ▼
@@ -215,13 +216,57 @@ for img in pages:
    - 若 OCR 无标签 → 跳过 VLM → 直接复用 `detected_names`
 3. **Override 匹配算法** (`_match_override_to_detected`)：当 override 有 N 个名字但当前页只有 M 个谱表（M < N，部分乐器 tacet）时，遍历 C(N,M) 种子序列组合，按名字匹配度 + 音高范围验证选出最佳匹配，同时报告哪些乐器 tacet
 
-### 拍号推断与跨页传播
+### 跨页拍号/调号传播（ts_context）
 
-`page_measure_ts` 为每个小节确定拍号，规则如下：
+`run_pipeline` 返回一个 `ts_context` 元组，供下一页调用时传入：
+
+```python
+ts_context = (last_ts, ended_with_bar, last_ks, ks_changed, pending_ks_fixup)
+```
+
+| 字段 | 含义 |
+|---|---|
+| `last_ts` | 本页最后生效的拍号 `(beats, beat_type)` |
+| `ended_with_bar` | 本页最后一小节是否以双小节线结尾（下一页新段落开始）|
+| `last_ks` | 本页末尾各声部的调号上下文 `[(name, chromatic, fifths), ...]` |
+| `ks_changed` | 本页是否出现过双小节线（下一页应信任 HOMR 读取的调号）|
+| `pending_ks_fixup` | 回溯修正待定项 `(file_path, from_m, to_m)` |
+
+#### Layer 0：拍号推断（per-page）
+
+`_cross_part_post_process` 内的 Layer 0 在每页独立处理拍号，并利用跨页上下文：
+
+1. **双小节线分段**：用 `_double_bar_measures` 找到页内所有双小节线位置，对每段独立推断拍号。
+2. **幻象小节剥离**：双小节线后内容稀疏的尾随小节（< 1/3 声部有音符）作为 TrOMR 识别末端伪影被剥离。
+3. **段落内拍号**：
+   - 无前页上下文或上页以双小节线结尾（`prev_bar_ended=True`）：信任 HOMR 自身的多数投票拍号。
+   - 有继承上下文（`prev_ts`）：若 HOMR 分母变化或 ≥90% 置信度则认为有新拍号打印，否则继承 `prev_ts`。
+4. **VLM 辅助（`_retry_tromr_post_double`）**：双小节线后 TrOMR 拍号置信度 ≤75% 时，裁取双小节线右侧区域，向 VLM 采集最多 5 个谱表的投票：
+   - VLM 读出数字拍号 → 若与前段不同则注入；若相同则确认并覆写任何错误读数。
+   - VLM 判断无拍号符号 → 继承前段拍号，覆盖 TrOMR 的错误读数。
+   - VLM 出错 → 退回 TrOMR 重跑后双小节线区域。
+
+#### Layer 0b：调号传播（per-page）
+
+调号传播依赖同一 `ts_context` 中的 `last_ks` / `ks_changed`：
+
+- **无双小节线页（`prev_ks_changed=False`）**：继承上页/system 末尾的调号，覆盖 HOMR 在无打印调号时的乱读。
+- **有双小节线页（`prev_ks_changed=True`）**：信任 HOMR 在新段落开头读取的调号（TrOMR 能正确读出段落首的调号符号）。
+- **回溯修正（`ks_fixup_range`）**：若双小节线出现在页面**中间**，双小节线之后到页末的小节带有旧调号。等下一页处理完成、正确调号已知后，`_fixup_ks_in_file` 对之前写入磁盘的文件做回溯修正。
+
+```
+页 N 处理完 → pending_ks_fixup = (page_N.musicxml, m_dbl+1, m_end)
+页 N+1 处理完 → prev_ks 即为新调号
+              → _fixup_ks_in_file(page_N.musicxml, prev_ks, m_dbl+1, m_end)
+```
+
+#### 合并阶段的拍号（merge_pages）
+
+`merge_pages` 中的 `page_measure_ts` 为每个小节位置确定拍号，规则如下：
 
 1. **仅统计显式标记**：只有包含 `<time>` 元素的小节，以及之后拥有实音符（非全休止）的小节才参与投票。全休止符在 4/4 和 6/4 下外观完全相同，无法区分，不参与投票。
 2. **多数投票**：同一小节位置各声部拍号不同时，取票数最多的那个。
-3. **跨系统/页传播**：若某 system 内没有任何 `<time>` 标记，直接继承前一 system 最后一个小节的拍号，而非默认为 4/4。
+3. **跨页传播**：从前一页末尾拍号继承，避免无标记小节被默认为 4/4。
 
 这解决了多 system 页面（如 system 1 = 6/4，system 2 新乐器入场无标记）中新乐器的全休止小节被错误地判断为 4/4 的问题。
 
@@ -267,8 +312,8 @@ python run_score.py score.pdf 1 10 --dpi 400
 默认输出到 `outputs/{pdf名}_{起始页}_{结束页}.musicxml`，中间产物（逐页 PNG 和 MusicXML）存在 `outputs/{pdf名}/` 下。
 
 内部流程：
-1. `pdf2image` 将指定页渲染为 PNG
-2. 逐页调用 `run_pipeline`，自动跨页传播乐器名
+1. `pdf2image` 将指定页渲染为 PNG（存于 `outputs/{stem}/`）
+2. 逐页调用 `run_pipeline`，自动跨页传播**乐器名、拍号与调号**（`ts_context`）
 3. 多页时调用 `merge_pages` 合成最终 MusicXML
 
 | 参数 | 说明 |
@@ -302,18 +347,26 @@ python pipeline.py image_directory/ --check
 from pipeline import run_pipeline, merge_pages
 
 # 单页，指定乐器名（跳过 VLM/OCR 识别）
-run_pipeline("page.png", "out.musicxml", part_names_override=[
-    "Flute", "Clarinet:A", "Horn:F", "Violin", ...
-])
+out_path, part_names, ts_ctx = run_pipeline(
+    "page.png", "out.musicxml",
+    part_names_override=["Flute", "Clarinet:A", "Horn:F", "Violin", ...]
+)
 
-# 多页跨页传播
+# 多页跨页传播（拍号/调号/乐器名全部跨页传播）
 detected_names = None
-for img in pages:
-    _, names = run_pipeline(img, out, part_names_override=detected_names)
+ts_context = None
+for img, out in zip(png_paths, xml_paths):
+    _, names, ts_context = run_pipeline(
+        img, out,
+        part_names_override=detected_names,
+        ts_context=ts_context,
+    )
     if detected_names is None and names:
         detected_names = names
-merge_pages(page_xmls, "merged.musicxml")
+merge_pages(xml_paths, "merged.musicxml")
 ```
+
+`run_pipeline` 返回 `(output_path, part_names, ts_context)` 三元组。`ts_context` 应原样传给下一页的 `run_pipeline` 调用，以实现拍号/调号的跨页传播（详见[跨页拍号/调号传播](#跨页拍号调号传播ts_context)）。
 
 pipeline.py 参数：
 

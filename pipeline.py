@@ -101,6 +101,8 @@ INSTRUMENT_ABBREVS = {
     "englisch horn": "English Horn", "englisches horn": "English Horn",
     "arpa": "Harp", "harp": "Harp", "harfe": "Harp",
     "piano": "Piano", "pf": "Piano", "pf.": "Piano",
+    "klav": "Piano", "klav.": "Piano", "klavier": "Piano",
+    "keyboard": "Piano",
     "cel": "Celesta", "cel.": "Celesta", "celesta": "Celesta",
 }
 
@@ -213,6 +215,20 @@ def _parse_instrument_key(name: str):
     return name, None
 
 
+_INSTRUMENT_SYNONYMS = {
+    "Keyboard": "Piano",
+    "Klavier": "Piano",
+    "Pianoforte": "Piano",
+    "Grand Piano": "Piano",
+    "Forte Piano": "Piano",
+    "Double Bass": "Contrabass",
+    "String Bass": "Contrabass",
+    "Bass": "Contrabass",
+    "French Horn": "Horn",
+    "English Horn": "English Horn",
+}
+
+
 def _instrument_base(name: str) -> str:
     """Strip 'in X' suffix for INSTRUMENT_MIDI / ORCHESTRAL_ORDER lookups.
     For shared-staff names like 'Bass Drum/Cymbals', use the primary (first) instrument.
@@ -220,6 +236,7 @@ def _instrument_base(name: str) -> str:
     base = _parse_instrument_key(name)[0]
     if "/" in base:
         base = base.split("/")[0].strip()
+    base = _INSTRUMENT_SYNONYMS.get(base, base)
     if base not in INSTRUMENT_MIDI:
         match = max((k for k in INSTRUMENT_MIDI if base.startswith(k)), key=len, default=None)
         if match:
@@ -928,7 +945,22 @@ def _match_override_to_detected(override: List[str], detected: List[str],
         matched = [override[i] for i in best_indices]
         print(f"[Override] Matched {best_name}/{N} by name, pitch={best_pitch:.1f}, bad={best_bad}, tacet: {dropped}")
         return matched
-    print(f"[Override] Poor match ({best_name}/{N}), using first {N} names")
+    # Poor name/pitch match — fall back to pitch-only best if available,
+    # otherwise pick the N override names whose bases most overlap with detected bases.
+    if part_pitches:
+        candidates.sort(key=lambda c: (c[2], -c[1]))
+        _, _, _, best_indices = candidates[0]
+        result = [override[i] for i in best_indices]
+        print(f"[Override] Poor name match ({best_name}/{N}), using pitch-best: {result}")
+        return result
+    # No pitch info: pick N names from override whose bases appear in detected_bases.
+    detected_base_set = set(detected_bases)
+    preferred = [i for i in range(M) if _instrument_base(override[i]) in detected_base_set]
+    if len(preferred) >= N:
+        result = [override[i] for i in preferred[:N]]
+        print(f"[Override] Poor name match ({best_name}/{N}), matched by base: {result}")
+        return result
+    print(f"[Override] Poor name match ({best_name}/{N}), using first {N} names")
     return override[:N]
 
 
@@ -1059,7 +1091,7 @@ _VLM_PROMPT_PASS1 = """This is a page from an orchestral music score.
 {ocr_hint}
 Look at each staff (a group of 5 horizontal lines) from top to bottom.
 Use the stave y-positions above to anchor each staff's location. For each staff, identify which instrument it belongs to based on the label on the left margin.
-Translate German abbreviations to English (Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Vl.=Violin, Va./Br.=Viola, Vc./Vcll.=Cello, B./Kb.=Contrabass, Ten.Hr.=Tenor Horn).
+Translate German abbreviations to English (Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcll.=Cello, B./Kb.=Contrabass, Ten.Hr.=Tenor Horn).
 For transposing instruments include the key only if explicitly written (e.g. "Clarinet in A"). Do NOT assume default keys.
 For each staff, write one line: "Staff N (y=...): InstrumentName — reason". No markdown, no bullet points."""
 
@@ -1076,7 +1108,7 @@ Use formal English instrument names. Append :KEY ONLY for transposing instrument
 - If two different labels clearly point to the SAME single staff (stacked beside one staff), join: e.g. "Trombone/Tuba".
 - "B" as a KEY means Bb; "B." or "Kb." as an INSTRUMENT means Contrabass.
 - CRITICAL: "in X" key labels at different y-positions apply only to the nearest staves.
-- German: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Beck./Bck.=Cymbals, Tamt./T.-t.=Tam-tam, Trgl.=Triangle, Ten.Hr.=Tenor Horn, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl./Vcll.=Cello, B./Kb./K-B./K.B.=Contrabass.
+- German: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Bcl./Bkl.=Bass Clarinet, Fg./Fag.=Bassoon, C-Fag./K-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp./Trpt.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Beck./Bck.=Cymbals, Tamt./T.-t.=Tam-tam, Trgl.=Triangle, Ten.Hr.=Tenor Horn, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc./Vcl./Vcll.=Cello, B./Kb./K-B./K.B.=Contrabass.
 - Output ONLY instrument names. No explanations, no numbering, no extra text.
 There are exactly {n} staves. Output exactly {n} lines."""
 
@@ -1179,6 +1211,64 @@ def _vlm_read_instrument_names(image_pil, n_staves: int, ocr_hint: str = "") -> 
     text = r2.choices[0].message.content.strip()
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     return lines
+
+
+def _vlm_read_time_sig(pil_crop) -> "tuple | None":
+    """Ask VLM to read a time signature from a cropped staff image.
+
+    The crop should span the full system height from the double barline to just
+    before the first note, so the time signature digits are clearly visible.
+    Returns (beats, beat_type) as ints, or None if VLM can't determine it.
+    """
+    import base64, io, re as _re
+    try:
+        import openai
+    except ImportError:
+        return None
+
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    api_key, base_url = None, None
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("API_KEY="):
+                    api_key = line.split("=", 1)[1]
+                elif line.startswith("BASE_URL="):
+                    base_url = line.split("=", 1)[1]
+    if not api_key or not base_url:
+        return None
+
+    buf = io.BytesIO()
+    pil_crop.save(buf, format="PNG")
+    img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    prompt = (
+        "This image shows an orchestral score region containing a double barline. "
+        "What is the time signature printed after the double barline? "
+        "Reply with ONLY the fraction, e.g. '5/4', '3/2', '4/4', '6/8', '12/8'. "
+        "If no time signature is visible, reply with exactly 'no'. "
+        "No other text."
+    )
+    client = openai.OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1/")
+    try:
+        r = client.chat.completions.create(
+            model="Qwen3-VL-235B-A22B-Instruct",
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]}],
+            max_tokens=20,
+            temperature=0.0,
+        )
+        raw = r.choices[0].message.content.strip()
+        print(f"[VLM-TimeSig] raw: {raw!r}")
+        m = _re.search(r'(\d+)\s*/\s*(\d+)', raw)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception as e:
+        print(f"[VLM-TimeSig] failed: {e}")
+    return None
 
 
 def _is_junk_ocr(t: str) -> bool:
@@ -1747,6 +1837,8 @@ def _ocr_expression_regions(img_bgr):
     y = 0
     while y < h:
         y2 = min(y + strip_h, h)
+        if y2 - y < 20:  # RapidOCR rounds dims to nearest multiple of 32; a strip this
+            break        # short rounds to 0 after scaling (e.g. h=8 → scaled 6 → 0)
         strip = img_bgr[y:y2, :]
         result, _ = ocr(strip)
         if result:
@@ -1852,61 +1944,6 @@ def detect_dynamics(staffs_sorted, img_path, bar_line_boxes, homr_shape):
     return results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Key signature correction via accidental template matching
-# ══════════════════════════════════════════════════════════════════════════════
-
-BRAVURA_FONT_PATH = os.path.join(
-    os.path.dirname(__file__), "audiveris", "app", "res", "Bravura.otf"
-)
-
-ACCIDENTAL_CODEPOINTS = {
-    "flat":    0xE260,
-    "natural": 0xE261,
-    "sharp":   0xE262,
-}
-
-
-def _render_glyph(font_path, codepoint, font_size):
-    """Render a single SMuFL glyph, return binary image (white-on-black)."""
-    from PIL import Image as PILImage, ImageFont, ImageDraw
-
-    font = ImageFont.truetype(font_path, font_size)
-    ch = chr(codepoint)
-    dummy = PILImage.new("L", (1, 1), 255)
-    draw = ImageDraw.Draw(dummy)
-    bbox = draw.textbbox((0, 0), ch, font=font)
-    w = bbox[2] - bbox[0] + 4
-    h = bbox[3] - bbox[1] + 4
-    if w < 3 or h < 3:
-        return None
-    img = PILImage.new("L", (w, h), 255)
-    draw = ImageDraw.Draw(img)
-    draw.text((2 - bbox[0], 2 - bbox[1]), ch, font=font, fill=0)
-    arr = np.array(img)
-    _, binary = cv2.threshold(arr, 128, 255, cv2.THRESH_BINARY_INV)
-    coords = cv2.findNonZero(binary)
-    if coords is None:
-        return None
-    x, y, cw, ch2 = cv2.boundingRect(coords)
-    return binary[y:y+ch2, x:x+cw]
-
-
-def render_accidental_templates(unit_size):
-    """Render flat/natural/sharp templates at multiple font sizes scaled to unit_size.
-    Returns dict: {accidental_name: [list of grayscale template images (dark on white)]}."""
-    base_font_size = int(unit_size * 4.5)
-    templates = {}
-    for name, cp in ACCIDENTAL_CODEPOINTS.items():
-        tmpls = []
-        for scale in [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]:
-            fs = max(12, int(base_font_size * scale))
-            t = _render_glyph(BRAVURA_FONT_PATH, cp, fs)
-            if t is not None:
-                tmpls.append(255 - t)
-        templates[name] = tmpls
-    return templates
-
 
 def detect_double_barlines(staff, bar_line_boxes):
     """Find double barline x-positions for a given staff from raw barline boxes.
@@ -1957,446 +1994,56 @@ def detect_double_barlines(staff, bar_line_boxes):
     return sorted(double_barline_xs)
 
 
-def _match_accidental_templates(gray_crop, templates_list, threshold=0.7):
-    """Match a list of template images against a gray crop.
-    Returns list of (cx, cy, w, h, score)."""
-    all_dets = []
-    for tmpl in templates_list:
-        th, tw = tmpl.shape[:2]
-        if th > gray_crop.shape[0] or tw > gray_crop.shape[1]:
-            continue
-        result = cv2.matchTemplate(gray_crop, tmpl, cv2.TM_CCOEFF_NORMED)
-        locs = np.where(result >= threshold)
-        for py, px in zip(*locs):
-            score = float(result[py, px])
-            cx = px + tw / 2
-            cy = py + th / 2
-            all_dets.append((cx, cy, tw, th, score))
-    return all_dets
-
-
-def _nms_accidentals(detections, iou_threshold=0.3):
-    """NMS for accidental detections. Input: list of (cx, cy, w, h, score)."""
-    if not detections:
-        return []
-    boxes = np.array([[d[0] - d[2]/2, d[1] - d[3]/2,
-                       d[0] + d[2]/2, d[1] + d[3]/2] for d in detections])
-    scores = np.array([d[4] for d in detections])
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    areas = (x2 - x1) * (y2 - y1)
-    order = scores.argsort()[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        if order.size == 1:
-            break
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        w = np.maximum(0, xx2 - xx1)
-        h = np.maximum(0, yy2 - yy1)
-        inter = w * h
-        union = areas[i] + areas[order[1:]] - inter
-        iou = np.where(union > 0, inter / union, 0)
-        inds = np.where(iou <= iou_threshold)[0]
-        order = order[inds + 1]
-    return [detections[i] for i in keep]
-
-
-def detect_accidentals_in_region(gray_crop, accidental_templates, threshold=0.7):
-    """Detect flat/natural/sharp counts in a cropped region.
-    Uses a stricter threshold for flat/sharp to reduce false positives.
-    Returns dict: {'flat': N, 'natural': N, 'sharp': N}."""
-    thresholds = {"natural": threshold, "flat": threshold + 0.05, "sharp": threshold + 0.05}
-    counts = {}
-    for name, tmpls in accidental_templates.items():
-        t = thresholds.get(name, threshold)
-        dets = _match_accidental_templates(gray_crop, tmpls, t)
-        dets = _nms_accidentals(dets)
-        counts[name] = len(dets)
-    return counts
-
-
-# ── Accidental CNN classifier ──────────────────────────────────────────────
-
-import torch
-import torch.nn as nn
-
-ACCIDENTAL_CLASSES = ["flat", "natural", "sharp"]
-ACCIDENTAL_CNN_PATH = os.path.join(os.path.dirname(__file__), "accidental_cnn.pth")
-_ACCIDENTAL_CNN_PATCH_H = 32
-_ACCIDENTAL_CNN_PATCH_W = 24
-
-
-class AccidentalCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),
-        )
-        self.classifier = nn.Linear(64, len(ACCIDENTAL_CLASSES))
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
-        return self.classifier(x)
-
-
-def _generate_accidental_data(n_per_class=2000, seed=42):
-    """Generate synthetic training patches from Bravura font with augmentation."""
-    rng = np.random.RandomState(seed)
-    H, W = _ACCIDENTAL_CNN_PATCH_H, _ACCIDENTAL_CNN_PATCH_W
-    images, labels = [], []
-
-    for cls_idx, (name, cp) in enumerate(ACCIDENTAL_CODEPOINTS.items()):
-        for _ in range(n_per_class):
-            font_size = rng.randint(28, 51)
-            glyph = _render_glyph(BRAVURA_FONT_PATH, cp, font_size)
-            if glyph is None:
-                continue
-
-            gh, gw = glyph.shape
-            scale = rng.uniform(0.7, 1.3)
-            new_h = max(5, int(gh * scale))
-            new_w = max(3, int(gw * scale))
-            glyph = cv2.resize(glyph, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            gh, gw = glyph.shape
-
-            canvas = np.full((H, W), 255, dtype=np.uint8)
-            if gh > H or gw > W:
-                glyph = cv2.resize(glyph, (min(gw, W - 2), min(gh, H - 2)))
-                gh, gw = glyph.shape
-
-            max_y = max(0, H - gh)
-            max_x = max(0, W - gw)
-            oy = rng.randint(0, max_y + 1)
-            ox = rng.randint(0, max_x + 1)
-            canvas[oy:oy+gh, ox:ox+gw] = np.minimum(
-                canvas[oy:oy+gh, ox:ox+gw],
-                255 - glyph
-            )
-
-            line_spacing = rng.randint(5, 11)
-            line_start = rng.randint(0, max(1, line_spacing))
-            line_thickness = rng.choice([1, 1, 1, 2])
-            y = line_start
-            while y < H:
-                canvas[y:min(H, y+line_thickness), :] = 255
-                y += line_spacing
-
-            if rng.rand() < 0.5:
-                k = rng.choice([3, 3, 5])
-                canvas = cv2.GaussianBlur(canvas, (k, k), rng.uniform(0.3, 1.0))
-
-            noise_sigma = rng.uniform(0, 15)
-            if noise_sigma > 1:
-                noise = rng.randn(H, W) * noise_sigma
-                canvas = np.clip(canvas.astype(float) + noise, 0, 255).astype(np.uint8)
-
-            if rng.rand() < 0.3:
-                kern = np.ones((2, 2), np.uint8)
-                canvas = cv2.erode(canvas, kern, iterations=1)
-            elif rng.rand() < 0.3:
-                kern = np.ones((2, 2), np.uint8)
-                canvas = cv2.dilate(canvas, kern, iterations=1)
-
-            alpha = rng.uniform(0.7, 1.3)
-            beta = rng.uniform(-20, 20)
-            canvas = np.clip(canvas.astype(float) * alpha + beta, 0, 255).astype(np.uint8)
-
-            images.append(canvas)
-            labels.append(cls_idx)
-
-    images = np.array(images, dtype=np.float32) / 255.0
-    labels = np.array(labels, dtype=np.int64)
-    return images, labels
-
-
-def _train_accidental_cnn(save_path=None, n_per_class=2000, epochs=30, lr=1e-3):
-    """Train the AccidentalCNN on synthetic data and save weights."""
-    if save_path is None:
-        save_path = ACCIDENTAL_CNN_PATH
-
-    print("[AccidentalCNN] Generating training data...")
-    images, labels = _generate_accidental_data(n_per_class=n_per_class)
-
-    perm = np.random.RandomState(0).permutation(len(images))
-    images, labels = images[perm], labels[perm]
-    split = int(0.8 * len(images))
-    train_x, val_x = images[:split], images[split:]
-    train_y, val_y = labels[:split], labels[split:]
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AccidentalCNN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
-    batch_size = 128
-
-    train_x_t = torch.from_numpy(train_x).unsqueeze(1).to(device)
-    train_y_t = torch.from_numpy(train_y).to(device)
-    val_x_t = torch.from_numpy(val_x).unsqueeze(1).to(device)
-    val_y_t = torch.from_numpy(val_y).to(device)
-
-    for epoch in range(epochs):
-        model.train()
-        perm_idx = torch.randperm(len(train_x_t))
-        total_loss = 0
-        n_batches = 0
-        for i in range(0, len(train_x_t), batch_size):
-            idx = perm_idx[i:i+batch_size]
-            out = model(train_x_t[idx])
-            loss = criterion(out, train_y_t[idx])
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            n_batches += 1
-
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            model.eval()
-            with torch.no_grad():
-                val_out = model(val_x_t)
-                val_pred = val_out.argmax(dim=1)
-                val_acc = (val_pred == val_y_t).float().mean().item()
-            print(f"  Epoch {epoch+1:2d}: loss={total_loss/n_batches:.4f} val_acc={val_acc:.3f}")
-
-    model.eval()
-    with torch.no_grad():
-        val_out = model(val_x_t)
-        val_pred = val_out.argmax(dim=1)
-        val_acc = (val_pred == val_y_t).float().mean().item()
-        for ci, cn in enumerate(ACCIDENTAL_CLASSES):
-            mask = val_y_t == ci
-            if mask.sum() > 0:
-                acc = (val_pred[mask] == ci).float().mean().item()
-                print(f"  {cn}: {acc:.3f} ({mask.sum().item()} samples)")
-
-    torch.save(model.state_dict(), save_path)
-    print(f"[AccidentalCNN] Saved to {save_path} (val_acc={val_acc:.3f})")
-    return model
-
-
-_accidental_cnn_cache = None
-
-
-def _load_accidental_cnn():
-    """Load or train the accidental CNN. Caches in memory."""
-    global _accidental_cnn_cache
-    if _accidental_cnn_cache is not None:
-        return _accidental_cnn_cache
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AccidentalCNN().to(device)
-
-    if os.path.exists(ACCIDENTAL_CNN_PATH):
-        model.load_state_dict(torch.load(ACCIDENTAL_CNN_PATH, map_location=device))
-        model.eval()
-    else:
-        model = _train_accidental_cnn(ACCIDENTAL_CNN_PATH)
-        model = model.to(device)
-        model.eval()
-
-    _accidental_cnn_cache = model
-    return model
-
-
-def _classify_accidental_patch(model, gray_patch):
-    """Classify a single grayscale patch. Returns (class_name, confidence)."""
-    H, W = _ACCIDENTAL_CNN_PATCH_H, _ACCIDENTAL_CNN_PATCH_W
-    patch = cv2.resize(gray_patch, (W, H), interpolation=cv2.INTER_AREA)
-    tensor = torch.from_numpy(patch.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
-    device = next(model.parameters()).device
-    tensor = tensor.to(device)
-    with torch.no_grad():
-        logits = model(tensor)
-        probs = torch.softmax(logits, dim=1)
-        cls_idx = probs.argmax(dim=1).item()
-        conf = probs[0, cls_idx].item()
-    return ACCIDENTAL_CLASSES[cls_idx], conf
-
-
-def correct_key_signatures(result_staffs, staffs_sorted, original_image, bar_line_boxes,
-                           full_res_image=None):
-    """Detect double barlines, classify accidentals with CNN in key change zones,
-    and correct keySignature tokens in EncodedSymbol sequences.
-
-    result_staffs: list[list[EncodedSymbol]] from parse_staffs()
-    staffs_sorted: list[Staff] (HOMR staff objects)
-    original_image: HOMR-resolution image (BGR or grayscale)
-    bar_line_boxes: list[RotatedBoundingBox] from HOMR barline detection
-    full_res_image: full-resolution page image for CNN classification (optional;
-                    if None, falls back to original_image)
-    """
-    import math
-    from collections import Counter
-
-    if len(original_image.shape) == 3:
-        gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = original_image
-    img_h, img_w = gray.shape[:2]
-
-    if full_res_image is not None:
-        if len(full_res_image.shape) == 3:
-            gray_full = cv2.cvtColor(full_res_image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray_full = full_res_image
-        coord_scale = gray_full.shape[1] / img_w
-    else:
-        gray_full = gray
-        coord_scale = 1.0
-
-    full_h, full_w = gray_full.shape[:2]
-
-    if not staffs_sorted:
-        return 0
-
-    unit = float(np.median([s.average_unit_size for s in staffs_sorted]))
-    acc_templates = render_accidental_templates(unit)
-
-    # ── Consensus double barline: find the most common x across all staves ──
-    all_valid_staffs = [s for s in staffs_sorted if s.max_x - s.min_x >= 100]
-    all_dbl_xs = []
-    for s in all_valid_staffs:
-        dxs = detect_double_barlines(s, bar_line_boxes)
-        all_dbl_xs.extend(dxs)
-
-    if not all_dbl_xs:
-        return 0
-
-    rounded = [round(x / 5) * 5 for x in all_dbl_xs]
-    most_common_x = Counter(rounded).most_common(1)[0][0]
-    consensus_xs = [x for x in all_dbl_xs if abs(round(x / 5) * 5 - most_common_x) <= 20]
-    if not consensus_xs:
-        return 0
-    consensus_dbl_x = float(np.median(consensus_xs))
-
-    # ── Load CNN classifier ──
-    cnn = _load_accidental_cnn()
-
-    n_corrected = 0
-    for si, staff in enumerate(staffs_sorted):
-        if si >= len(result_staffs):
-            break
-        if staff.max_x - staff.min_x < 100:
-            continue
-
-        u = staff.average_unit_size
-
-        # Check this staff has a double barline near consensus
-        staff_dbl_xs = detect_double_barlines(staff, bar_line_boxes)
-        dbl_x = None
-        for dx in staff_dbl_xs:
-            if abs(dx - consensus_dbl_x) <= 3 * u:
-                dbl_x = dx
-                break
-        if dbl_x is None:
-            if abs(consensus_dbl_x - staff.max_x) < staff.max_x * 0.5:
-                dbl_x = consensus_dbl_x
-            else:
-                continue
-
-        # ── Crop key change zone at HOMR res for candidate detection ──
-        x1 = int(max(0, dbl_x))
-        x2 = int(min(img_w, dbl_x + 12 * u))
-        y1 = int(max(0, staff.min_y - u))
-        y2 = int(min(img_h, staff.max_y + u))
-        if x2 <= x1 + 5 or y2 <= y1 + 5:
-            continue
-
-        crop = gray[y1:y2, x1:x2]
-
-        # ── Find candidate accidental positions via template matching ──
-        all_cand = _match_accidental_templates(crop, acc_templates["natural"], 0.55)
-        all_cand = _nms_accidentals(all_cand)
-
-        if len(all_cand) < 2:
-            continue
-
-        # ── Crop key change zone at full res for CNN classification ──
-        fx1 = int(max(0, x1 * coord_scale))
-        fx2 = int(min(full_w, x2 * coord_scale))
-        fy1 = int(max(0, y1 * coord_scale))
-        fy2 = int(min(full_h, y2 * coord_scale))
-        crop_full = gray_full[fy1:fy2, fx1:fx2]
-
-        # ── Classify each candidate with CNN using full-res patches ──
-        u_full = u * coord_scale
-        patch_h = int(u_full * 2.5)
-        patch_w = int(u_full * 1.8)
-        counts = {"flat": 0, "natural": 0, "sharp": 0}
-
-        for cx, cy, tw, th, score in all_cand:
-            fcx = cx * coord_scale
-            fcy = cy * coord_scale
-            px1 = int(max(0, fcx - patch_w / 2))
-            py1 = int(max(0, fcy - patch_h / 2))
-            px2 = int(min(crop_full.shape[1], fcx + patch_w / 2))
-            py2 = int(min(crop_full.shape[0], fcy + patch_h / 2))
-            if px2 - px1 < 6 or py2 - py1 < 10:
-                continue
-
-            patch = crop_full[py1:py2, px1:px2]
-            cls_name, conf = _classify_accidental_patch(cnn, patch)
-            if conf >= 0.5:
-                counts[cls_name] += 1
-
-        n_nat = counts["natural"]
-        n_flat = counts["flat"]
-        n_sharp = counts["sharp"]
-
-        if n_nat < 2:
-            continue
-
-        new_fifths = n_sharp - n_flat
-
-        # ── Find the keySignature token to modify ──
-        symbols = result_staffs[si]
-        region_xmin = staff.min_x - 2 * u
-        region_w = (staff.max_x + 2 * u) - region_xmin
-        canvas_dbl_x = (dbl_x - region_xmin) / region_w * 1280
-
-        best_idx = -1
-        best_dist = float("inf")
-        for idx, sym in enumerate(symbols):
-            if not sym.rhythm.startswith("keySignature_"):
-                continue
-            if sym.coordinates is None or math.isnan(sym.coordinates[0]):
-                continue
-            if sym.coordinates[0] > canvas_dbl_x:
-                dist = sym.coordinates[0] - canvas_dbl_x
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = idx
-
-        if best_idx >= 0 and best_dist < 300:
-            old_rhythm = symbols[best_idx].rhythm
-            new_rhythm = f"keySignature_{new_fifths}"
-            if old_rhythm != new_rhythm:
-                print(f"  [KeySig] Staff {si}: {old_rhythm} → {new_rhythm} "
-                      f"(detected {n_nat}♮ {n_flat}♭ {n_sharp}♯)")
-                symbols[best_idx].rhythm = new_rhythm
-                n_corrected += 1
-
-    return n_corrected
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # HOMR pipeline (all GPU)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _gap_based_system_split(staffs_sorted, avg_staff_h):
+    """Fallback system split using y-gaps between staves.
+    Finds the natural break in the gap distribution (largest relative jump) to
+    separate within-system gaps from between-system gaps.  Used when no tall
+    orchestral brackets are detected (e.g. piano/chamber scores)."""
+    if len(staffs_sorted) <= 1:
+        return [list(staffs_sorted)]
+
+    gaps = [staffs_sorted[i + 1].min_y - staffs_sorted[i].max_y
+            for i in range(len(staffs_sorted) - 1)]
+    pos_gaps = [g for g in gaps if g > 0]
+    if not pos_gaps:
+        return [list(staffs_sorted)]
+
+    # Find the natural break between small (within-system) and large (between-system) gaps.
+    # Look for the largest relative jump in the sorted gap distribution.
+    sorted_g = sorted(pos_gaps)
+    best_ratio, best_i = 0.0, 0
+    for j in range(len(sorted_g) - 1):
+        if sorted_g[j] > 0:
+            ratio = sorted_g[j + 1] / sorted_g[j]
+            if ratio > best_ratio:
+                best_ratio, best_i = ratio, j
+    # Require at least 1.5× jump to avoid splitting on minor spacing variation.
+    if best_ratio < 1.5:
+        return [list(staffs_sorted)]
+    split_threshold = sorted_g[best_i + 1]
+    split_after = [i for i, g in enumerate(gaps) if g >= split_threshold]
+    if not split_after:
+        return [list(staffs_sorted)]
+
+    systems, start = [], 0
+    for i in split_after:
+        systems.append(list(staffs_sorted[start:i + 1]))
+        start = i + 1
+    systems.append(list(staffs_sorted[start:]))
+    result = [s for s in systems if s]
+    return result if result else [list(staffs_sorted)]
+
+
 def _detect_system_breaks(staffs_sorted, brace_dots):
     """Split sorted staves into system groups using large bracket detection.
     Each system starts with a tall bracket/brace on the left that spans all
-    its staves.  We find these tall bounding-boxes and assign staves to them."""
+    its staves.  We find these tall bounding-boxes and assign staves to them.
+    Falls back to gap-based detection for piano/chamber scores without tall brackets."""
     if len(staffs_sorted) <= 1:
         return [list(staffs_sorted)]
 
@@ -2413,7 +2060,11 @@ def _detect_system_breaks(staffs_sorted, brace_dots):
             candidates.append((y_top, y_bot))
 
     if not candidates:
-        return [list(staffs_sorted)]
+        # No tall orchestral brackets detected — try gap-based split (piano/chamber scores).
+        result = _gap_based_system_split(staffs_sorted, avg_staff_h)
+        if len(result) > 1:
+            print(f"[SystemBreak] Gap-based split: {[len(s) for s in result]} staves per system")
+        return result
 
     candidates.sort(key=lambda b: b[0])
 
@@ -2426,6 +2077,14 @@ def _detect_system_breaks(staffs_sorted, brace_dots):
             merged.append([top, bot])
 
     if len(merged) <= 1:
+        # Only one bracket region found — this page may still have multiple systems
+        # (e.g. an orchestral system followed by piano-solo systems with no tall bracket).
+        # Try gap-based split as a second opinion.
+        gap_result = _gap_based_system_split(staffs_sorted, avg_staff_h)
+        if len(gap_result) > 1:
+            print(f"[SystemBreak] Gap-based override (1 bracket): "
+                  f"{[len(s) for s in gap_result]} staves per system")
+            return gap_result
         return [list(staffs_sorted)]
 
     systems = [[] for _ in merged]
@@ -2451,7 +2110,7 @@ _VLM_EXTRA_SYSTEM_PROMPT = """This is a CROPPED region from an orchestral music 
 Read each instrument name or abbreviation from top to bottom.
 Map each to one of these standard names: {master_names}
 There are exactly {n} staves in this region. Output exactly {n} lines, one standard name per staff, from top to bottom. No numbering, no extra text.
-German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass."""
+German abbreviations: Fl.=Flute, Ob.=Oboe, Kl./Cl.=Clarinet, Fg./Fag.=Bassoon, C-Fag.=Contrabassoon, Hr./Hrn.=Horn, Trp.=Trumpet, Pos.=Trombone, Pk.=Timpani, Gr.Tr.=Bass Drum, Klav./Kl./Klavier=Piano, Hrf./Hfe.=Harp, Cel.=Celesta, Vl.=Violin, Va./Br.=Viola, Vc.=Cello, B./Kb.=Contrabass."""
 
 
 def _ocr_extra_system_names(sys_staves, image, master_names, use_vlm=True):
@@ -2665,21 +2324,25 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     system_groups = _detect_system_breaks(staffs_sorted, brace_dots)
     sys_sizes = [len(g) for g in system_groups]
 
-    # Merge adjacent small systems that together equal the first system's staff count
+    # Merge adjacent small systems that together equal the first system's staff count.
+    # This re-joins systems that were incorrectly split by gap detection.
+    # If accumulated groups don't sum exactly to target, keep them as individual systems.
     if len(system_groups) > 1:
         target = len(system_groups[0])
         merged = [system_groups[0]]
         i = 1
         while i < len(system_groups):
-            acc = list(system_groups[i])
-            i += 1
-            while len(acc) < target and i < len(system_groups):
-                acc.extend(system_groups[i])
+            accumulated = []
+            acc_staves = []
+            while i < len(system_groups) and len(acc_staves) < target:
+                accumulated.append(system_groups[i])
+                acc_staves.extend(system_groups[i])
                 i += 1
-            if len(acc) == target:
-                merged.append(acc)
+            if len(acc_staves) == target:
+                merged.append(acc_staves)
             else:
-                merged.append(acc)
+                # Didn't reach target — these are genuinely smaller systems, keep separate.
+                merged.extend(accumulated)
         if [len(g) for g in merged] != sys_sizes:
             print(f"[HOMR] Merged split systems: {sys_sizes} → {[len(g) for g in merged]}")
             system_groups = merged
@@ -2692,6 +2355,23 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
 
     print(f"[HOMR] Detected {len(system_groups)} system(s): {sys_sizes} staves each")
 
+    # Remove duplicate staves within each system (same y-range detected twice by SegNet)
+    deduped_groups = []
+    for grp in system_groups:
+        seen, deduped = [], []
+        for s in grp:
+            key = (round(s.min_y / 5), round(s.max_y / 5))  # 5px tolerance
+            if key not in seen:
+                seen.append(key)
+                deduped.append(s)
+            else:
+                print(f"[HOMR] Removed duplicate stave at y={int(s.min_y)}-{int(s.max_y)}")
+        deduped_groups.append(deduped)
+    if [len(g) for g in deduped_groups] != sys_sizes:
+        system_groups = deduped_groups
+        sys_sizes = [len(g) for g in system_groups]
+        print(f"[HOMR] After dedup: {sys_sizes} staves each")
+
     first_sys_count = sys_sizes[0]
     all_same = all(sz == first_sys_count for sz in sys_sizes)
     multi_system_mode = (n_parts > 0 and first_sys_count == n_parts
@@ -2700,6 +2380,14 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     if multi_system_mode:
         # ── MULTI-SYSTEM with different staff counts ──
         print(f"[HOMR] Multi-system page: {sys_sizes}")
+        median_w = float(np.median([s.max_x - s.min_x for s in staffs_sorted]))
+        for gi, grp in enumerate(system_groups):
+            parts = []
+            for si, s in enumerate(grp):
+                w = int(s.max_x - s.min_x)
+                gap = int(s.min_y - grp[si-1].max_y) if si > 0 else 0
+                parts.append(f"s{si}:y={int(s.min_y)}-{int(s.max_y)} w={w}px gap={gap}px")
+            print(f"  sys{gi}: " + ", ".join(parts))
 
         transformer_config = Config()
         transformer_config.use_gpu_inference = use_gpu
@@ -2715,8 +2403,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
             homr_h, homr_w = predictions.original.shape[:2]
             coord_scale = full_image.shape[1] / homr_w
             tremolo_dets = detect_tremolo(full_image, tremolo_templates, threshold=0.75)
-
-        full_image_ks = cv2.imread(img_path)
 
         results = []
         for sys_idx, sys_staves in enumerate(system_groups):
@@ -2739,12 +2425,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                 if matched:
                     n_inj = inject_tremolo(sys_result, matched, sys_staves, part_count=len(sys_result))
                     print(f"[Tremolo] System {sys_idx + 1}: {n_inj} injected")
-
-            n_ks = correct_key_signatures(
-                sys_result, sys_staves, predictions.original,
-                bar_line_boxes, full_res_image=full_image_ks)
-            if n_ks:
-                print(f"[KeySig] System {sys_idx + 1}: {n_ks} corrected")
 
             writer_notes = []
             if collect_plugin_data:
@@ -2862,13 +2542,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
         else:
             print(f"[Tremolo] 0 detections ({time.time() - t_tr:.1f}s)")
 
-    t_ks = time.time()
-    full_image_ks = cv2.imread(img_path)
-    n_ks = correct_key_signatures(result_staffs, staffs_sorted, predictions.original,
-                                  bar_line_boxes, full_res_image=full_image_ks)
-    if n_ks:
-        print(f"[KeySig] Corrected {n_ks} key signature(s) ({time.time() - t_ks:.1f}s)")
-
     writer_notes = []
     if collect_plugin_data:
         _tag_symbols_for_plugin(result_staffs)
@@ -2879,6 +2552,12 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     )
     xml_root = generate_xml(xml_args, result_staffs, title)
     xml_string = xml_root.to_string()
+
+    xml_string = _retry_tromr_post_double(
+        staffs_sorted, bar_line_boxes, multi_staffs,
+        debug, predictions.preprocessed, xml_string, transformer_config,
+        full_res_image=_vlm_image, homr_to_full_scale=_vlm_scale, use_vlm=use_vlm,
+    )
 
     t_dyn = time.time()
     dynamics = detect_dynamics(staffs_sorted, img_path, bar_line_boxes, predictions.original.shape)
@@ -3018,7 +2697,8 @@ def _inject_part_names(xml_string: str, part_names: List[str]) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _cross_part_post_process(xml_string: str) -> str:
+def _cross_part_post_process(xml_string: str, prev_ts=None, prev_bar_ended: bool = False,
+                             prev_ks=None, prev_ks_changed: bool = False):
     """
     Post-process MusicXML using cross-part consistency constraints.
 
@@ -3026,94 +2706,262 @@ def _cross_part_post_process(xml_string: str) -> str:
     TrOMR recognizes each staff independently, so we use multi-part consensus
     to correct individual errors.
 
+    Layer 0 — Time sig + key sig via double-barline segmentation and cross-page context
     Layer 1 — Metadata alignment: time sig, key sig (majority vote per measure)
     Layer 2 — Structural alignment: unify measure count across parts
     Layer 3 — Content repair: fix measures whose duration != time signature
+
+    prev_ks: list of (part_name, chromatic_transpose, fifths) from previous system.
+             Only parts whose (name, transpose) exactly match an entry are updated.
+    prev_ks_changed: True if previous system had any double barline → trust HOMR's key.
+
+    Returns (xml_string, last_ts, this_bar_ended, last_ks, this_ks_changed).
+    last_ts:          time sig in effect at end of this section.
+    this_bar_ended:   True if the LAST measure ends with a double barline (time sig scope).
+    last_ks:          key sig contexts at end of this section (same format as prev_ks).
+    this_ks_changed:  True if any double barline appears (key sig scope).
     """
     from collections import Counter
 
     try:
         root = ET.fromstring(xml_string)
     except ET.ParseError:
-        return xml_string
+        return xml_string, prev_ts, False, prev_ks, False, None
 
     parts = root.findall("part")
     tremolo_n = _remove_invalid_two_note_tremolos(root)
     if tremolo_n:
         print(f"[PostProcess] Tremolo: removed {tremolo_n} invalid mark(s)")
     if len(parts) < 2:
-        return ET.tostring(root, encoding="unicode", xml_declaration=True)
+        return xml_string, prev_ts, False, prev_ks, False, None
 
     fixes = []
 
-    # ── Layer 0: Infer time signature if missing ──
-    has_any_time_sig = any(
-        m.find(".//time") is not None
+    # ── Layer 0: Time signature via double-barline context ──
+    all_mnums = sorted({
+        int(m.get("number", ""))
         for part in parts for m in part.findall("measure")
-    )
-    if not has_any_time_sig:
-        # compute m1 quarter-lengths from all parts via position tracking
-        m1_qls = []
-        for part in parts:
-            m1 = part.findall("measure")
-            if not m1:
-                continue
-            m1 = m1[0]
-            divs = 1
-            d_el = m1.findtext(".//divisions")
-            if d_el:
-                try:
-                    divs = int(d_el)
-                except ValueError:
-                    pass
-            pos = 0
-            max_pos = 0
-            for child in m1:
-                if child.tag == "note":
-                    if child.find("chord") is not None:
-                        continue
-                    dur = child.findtext("duration", "0")
-                    try:
-                        pos += int(dur)
-                    except ValueError:
-                        pass
-                    max_pos = max(max_pos, pos)
-                elif child.tag == "backup":
-                    dur = child.findtext("duration", "0")
-                    try:
-                        pos -= int(dur)
-                    except ValueError:
-                        pass
-                elif child.tag == "forward":
-                    dur = child.findtext("duration", "0")
-                    try:
-                        pos += int(dur)
-                    except ValueError:
-                        pass
-            if max_pos > 0:
-                m1_qls.append(max_pos / divs)
+        if m.get("number", "").lstrip("-").isdigit()
+    })
+    last_ts = prev_ts
+    last_ks = prev_ks
+    this_bar_ended = False
+    this_ks_changed = False
+    if all_mnums:
+        m_start, m_end = all_mnums[0], all_mnums[-1]
+        _all_dbls = _double_bar_measures(root)
+        first_dbl = _all_dbls[0] if _all_dbls else None
 
-        if m1_qls:
-            median_ql = sorted(m1_qls)[len(m1_qls) // 2]
-            # map to standard time signatures
-            ql_to_ts = {2.0: (2, 4), 3.0: (3, 4), 4.0: (4, 4), 6.0: (6, 4)}
-            rounded = round(median_ql * 2) / 2  # round to nearest 0.5
-            beats, beat_type = ql_to_ts.get(rounded, (round(rounded), 4))
-            fixes.append(f"Inferred time sig {beats}/{beat_type} from m1 durations (median={median_ql:.2f})")
-            # inject into first measure of every part
-            for part in parts:
-                m1 = part.findall("measure")
-                if not m1:
-                    continue
-                m1 = m1[0]
-                attrs = m1.find("attributes")
-                if attrs is None:
-                    attrs = ET.SubElement(m1, "attributes")
-                    m1.remove(attrs)
-                    m1.insert(0, attrs)
-                time_el = ET.SubElement(attrs, "time")
-                ET.SubElement(time_el, "beats").text = str(beats)
-                ET.SubElement(time_el, "beat-type").text = str(beat_type)
+        # Strip phantom measures from the END of the page.  Two cases:
+        # Case A — near a page-ending double barline: strip measures after the
+        #   barline (only trigger when last dbl is within 2 of the tail).
+        # Case B — no nearby double barline: strip 2+ consecutive sparse trailing
+        #   measures (< 1/3 parts with notes) as HOMR recognition artifacts.
+        def _parts_with_notes_fn(mnum):
+            return sum(
+                1 for p in parts
+                if any(m.get("number") == str(mnum) and m.findall("note")
+                       for m in p.findall("measure"))
+            )
+        _last_dbl = _all_dbls[-1] if _all_dbls else None
+        _phantom_stripped_b = []
+        if len(all_mnums) > 1:
+            _sparse_tail = []
+            while len(all_mnums) > 1 and _parts_with_notes_fn(all_mnums[-1]) < max(1, len(parts) // 3):
+                _sparse_tail.append(all_mnums.pop())
+            if len(_sparse_tail) >= 2:
+                _phantom_stripped_b = _sparse_tail
+            else:
+                all_mnums.extend(reversed(_sparse_tail))
+        if _phantom_stripped_b:
+            _s = set(_phantom_stripped_b)
+            m_end = all_mnums[-1]
+            _r = f"m{min(_phantom_stripped_b)}-{max(_phantom_stripped_b)}" if len(_phantom_stripped_b) > 1 else f"m{_phantom_stripped_b[0]}"
+            fixes.append(f"stripped phantom {_r}")
+            for _p in parts:
+                for _pm in list(_p.findall("measure")):
+                    try:
+                        if int(_pm.get("number", "")) in _s:
+                            _p.remove(_pm)
+                    except (ValueError, TypeError):
+                        pass
+        if _last_dbl is not None and _last_dbl >= m_end - 2 and len(all_mnums) > 1:
+            # When _last_dbl == m_end and m_end-1 is also a double barline,
+            # m_end is a phantom's opening barline — strip from m_end downward.
+            # Otherwise strip measures strictly after _last_dbl.
+            _all_dbls_set = set(_all_dbls)
+            _strip_from = (
+                _last_dbl
+                if _last_dbl == m_end and (m_end - 1) in _all_dbls_set
+                else _last_dbl + 1
+            )
+            _stripped = []
+            while len(all_mnums) > 1 and all_mnums[-1] >= _strip_from:
+                _stripped.append(all_mnums.pop())
+            if _stripped:
+                # Only strip measures where fewer than 1/3 of parts have any notes.
+                # Measures with real content (≥1/3 parts non-empty) are put back.
+                _n_parts = max(1, len(parts))
+                _phantom_set = set()
+                _restored = []
+                for _mnum in _stripped:
+                    _parts_with_notes = sum(
+                        1 for _p in parts
+                        if any(_nd.find("rest") is None
+                               for _m in _p.findall("measure")
+                               if _m.get("number") == str(_mnum)
+                               for _nd in _m.findall("note"))
+                    )
+                    if _parts_with_notes < _n_parts / 3:
+                        _phantom_set.add(_mnum)
+                    else:
+                        _restored.append(_mnum)
+                if _restored:
+                    all_mnums.extend(_restored)
+                    all_mnums.sort()
+                    print(f"[Phantom] Kept m{sorted(_restored)}: ≥1/3 parts have notes")
+                if _phantom_set:
+                    _phantom_list = sorted(_phantom_set)
+                    _r = (f"m{min(_phantom_list)}-{max(_phantom_list)}"
+                          if len(_phantom_list) > 1 else f"m{_phantom_list[0]}")
+                    fixes.append(f"stripped phantom {_r}")
+                    for _p in parts:
+                        for _pm in list(_p.findall("measure")):
+                            try:
+                                if int(_pm.get("number", "")) in _phantom_set:
+                                    _p.remove(_pm)
+                            except (ValueError, TypeError):
+                                pass
+                m_end = all_mnums[-1]
+
+        seg1_end = first_dbl if first_dbl is not None else m_end
+
+        def _homr_ts(from_measure, to_measure):
+            """Majority-vote time sig across all parts in [from_measure, to_measure].
+            Returns (ts, confidence) where confidence = fraction of votes for the winner
+            (1.0 = unanimous, ~0.5 = bare majority). Returns (None, 0.0) when no valid
+            time sig is found. Skips beat-type=1 (whole-note mis-emit by HOMR)."""
+            from collections import Counter as _Counter
+            votes: _Counter = _Counter()
+            for part in root.findall("part"):
+                for m in part.findall("measure"):
+                    try:
+                        mnum = int(m.get("number", ""))
+                    except (ValueError, TypeError):
+                        continue
+                    if not (from_measure <= mnum <= to_measure):
+                        continue
+                    t = m.find(".//time")
+                    if t is not None:
+                        try:
+                            bt = int(t.findtext("beat-type", "4"))
+                            if bt == 1:
+                                continue  # whole-note beat is a mis-emit; skip
+                            votes[(int(t.findtext("beats", "4")), bt)] += 1
+                        except ValueError:
+                            pass
+            if not votes:
+                return None, 0.0
+            best_ts, cnt = votes.most_common(1)[0]
+            return best_ts, cnt / sum(votes.values())
+
+        # Segment before (or without) first double barline
+        seg1_was_fallback = False
+        if prev_ts is None or prev_bar_ended:
+            # No prior context, OR new section starts after a double barline:
+            # Trust HOMR's time sig. At a system start TrOMR correctly reads the
+            # denominator token and HOMR derives the numerator from note durations,
+            # which is more reliable than our purely note-based inference.
+            _h, _h_conf = _homr_ts(m_start, seg1_end)
+            seg1_ts = _h or (4, 4)
+            if _h is None:
+                # HOMR had only invalid time sigs (e.g. beat-type=1); apply the fallback.
+                seg1_was_fallback = True
+                _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
+                fixes.append(f"m{m_start}-{seg1_end}: fallback {seg1_ts[0]}/{seg1_ts[1]}")
+            else:
+                fixes.append(f"m{m_start}-{seg1_end}: HOMR {seg1_ts[0]}/{seg1_ts[1]} (conf={_h_conf:.0%})")
+            # Don't call _apply_ts_to_segment when HOMR gave a valid ts: keep it in place
+        else:
+            # Continuation: inherit the previous time sig as-is (no normalization so
+            # that 3/2 stays 3/2 instead of being coerced to 6/4).
+            # Safety check: if HOMR's denominator differs from the inherited one, a
+            # new time sig is printed in this system → trust HOMR instead of inheriting.
+            homr_seg1, homr_conf = _homr_ts(m_start, seg1_end)
+            if homr_seg1 is not None and homr_seg1 != prev_ts and (
+                homr_seg1[1] != prev_ts[1]          # denominator changed
+                or homr_conf >= 0.90                # or same denom, numerator changed, very high agreement
+            ):
+                # A new printed time sig exists; trust HOMR.
+                # Denominator change is a hard signal (TrOMR reads the token directly).
+                # Same-denominator numerator change requires near-unanimous agreement to
+                # avoid acting on truncation artifacts (e.g. 3/2 misread as 2/2 due to
+                # missing rests), but is necessary for real changes like 3/2 → 2/2.
+                seg1_ts = homr_seg1
+                fixes.append(f"m{m_start}-{seg1_end}: HOMR {seg1_ts[0]}/{seg1_ts[1]} (was {prev_ts[0]}/{prev_ts[1]}, conf={homr_conf:.0%})")
+            else:
+                seg1_ts = prev_ts
+                _apply_ts_to_segment(root, seg1_ts, m_start, seg1_end)
+                fixes.append(f"m{m_start}-{seg1_end}: inherit {seg1_ts[0]}/{seg1_ts[1]}")
+        last_ts = seg1_ts
+
+        # Process each inter-double-barline segment separately so that multiple
+        # section changes within one page are handled independently.
+        if _all_dbls and _all_dbls[0] < m_end:
+            _prev_seg_ts = seg1_ts
+            for _i, _dbl in enumerate(_all_dbls):
+                _seg_start = _dbl + 1
+                _seg_end = _all_dbls[_i + 1] if _i + 1 < len(_all_dbls) else m_end
+                if _seg_start > m_end:
+                    break
+                _seg_ts_h, _ = _homr_ts(_seg_start, _seg_end)
+                if _seg_ts_h is not None:
+                    _seg_ts = _seg_ts_h
+                elif _i == 0 and seg1_was_fallback:
+                    _seg_ts = seg1_ts
+                elif _prev_seg_ts[1] == 4:
+                    _seg_ts = _infer_ts_from_measures(root, _seg_start, _seg_end) or _prev_seg_ts
+                else:
+                    _seg_ts = _prev_seg_ts
+                _apply_ts_to_segment(root, _seg_ts, _seg_start, _seg_end)
+                last_ts = _seg_ts
+                fixes.append(f"m{_seg_start}-{_seg_end}: HOMR/inferred {_seg_ts[0]}/{_seg_ts[1]}")
+                _prev_seg_ts = _seg_ts
+
+        # this_bar_ended: True only if the LAST measure ends with a double barline.
+        # Mid-system double barlines don't set this because the post-double time sig
+        # is already inferred and stored in last_ts, so the next system can inherit it.
+        this_bar_ended = (_last_dbl is not None and _last_dbl == m_end)
+        # this_ks_changed: True whenever ANY double barline appears (key sig scope).
+        # The next system shows the new key at its start and should trust HOMR's key.
+        this_ks_changed = bool(_all_dbls)
+        # ks_fixup_range: if the double barline is mid-system, the post-double section
+        # inherits the WRONG (old) key. We record this range so the caller can apply
+        # the correct key once the next system is processed and HOMR's new key is known.
+        ks_fixup_range = (
+            (first_dbl + 1, m_end)
+            if (len(_all_dbls) == 1 and first_dbl is not None and first_dbl < m_end)
+            else None
+        )
+        if fixes:
+            print(f"[TimeSig] " + "; ".join(fixes))
+
+    # ── Layer 0b: Key signature via double-barline context ──
+    # Rule: if no double barline in previous system (prev_ks_changed=False), inherit the
+    # previous page/system's key sig for all matching (part_name, chromatic_transpose) pairs.
+    # After a double barline, TrOMR fails at natural-sign key changes mid-system, but
+    # correctly reads the key at the START of the next system — so trust HOMR's key then.
+    ks_fixup_range = ks_fixup_range if all_mnums else None
+    if all_mnums:
+        ks_fixes = []
+        if prev_ks is not None and not prev_ks_changed:
+            # Continuation: inherit prev key sigs for matching parts over the whole system.
+            _apply_ks_contexts(root, prev_ks, m_start, m_end)
+            ks_fixes.append(f"m{m_start}-{m_end}: inherit {len(prev_ks)} parts")
+        # Always snapshot the current (possibly inherited) key sigs for the next system.
+        last_ks = _get_ks_contexts(root)
+        if ks_fixes:
+            print(f"[KeySig] " + "; ".join(ks_fixes))
 
     # ── Layer 1: Metadata alignment ──
 
@@ -3657,7 +3505,7 @@ def _cross_part_post_process(xml_string: str) -> str:
     else:
         print("[PostProcess] No fixes needed")
 
-    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+    return ET.tostring(root, encoding="unicode", xml_declaration=True), last_ts, this_bar_ended, last_ks, this_ks_changed, ks_fixup_range
 
 
 def _remove_invalid_two_note_tremolos(root):
@@ -4629,6 +4477,553 @@ ORCHESTRAL_ORDER = [
 ]
 
 
+def _dominant_time_sig(xml_string: str):
+    """Return (beats, beat_type) of the last explicit time sig in xml_string, or None."""
+    root = ET.fromstring(xml_string)
+    last = None
+    for t in root.iter("time"):
+        try:
+            last = (int(t.findtext("beats", "4")), int(t.findtext("beat-type", "4")))
+        except ValueError:
+            pass
+    return last
+
+
+def _replace_all_time_sigs(xml_string: str, beats: int, beat_type: str) -> str:
+    """Replace every <time>…</time> block in xml_string with the given values."""
+    import re
+    return re.sub(
+        r'<time>.*?</time>',
+        f'<time><beats>{beats}</beats><beat-type>{beat_type}</beat-type></time>',
+        xml_string, flags=re.DOTALL,
+    )
+
+
+def _normalize_ts(ts: tuple) -> tuple:
+    """Normalize half-note denominator to quarter-note equivalent: (3,2) → (6,4)."""
+    beats, beat_type = ts
+    return (beats * 2, 4) if beat_type == 2 else (beats, beat_type)
+
+
+def _first_double_bar_measure(root) -> "int | None":
+    """Return the first measure number with a double barline (majority vote across parts)."""
+    from collections import Counter
+    votes: Counter = Counter()
+    n_parts = max(1, len(root.findall("part")))
+    for part in root.findall("part"):
+        seen: set = set()
+        for m in part.findall("measure"):
+            try:
+                mnum = int(m.get("number", ""))
+            except (ValueError, TypeError):
+                continue
+            if mnum in seen:
+                continue
+            seen.add(mnum)
+            for bl in m.findall(".//barline"):
+                if bl.findtext("bar-style", "") in ("light-light", "heavy-heavy", "light-heavy"):
+                    votes[mnum] += 1
+    threshold = max(1, n_parts // 2)
+    candidates = sorted(m for m, c in votes.items() if c >= threshold)
+    return candidates[0] if candidates else None
+
+
+def _double_bar_measures(root) -> list:
+    """Return all measure numbers with a double barline (majority vote across parts)."""
+    from collections import Counter
+    votes: Counter = Counter()
+    n_parts = max(1, len(root.findall("part")))
+    for part in root.findall("part"):
+        seen: set = set()
+        for m in part.findall("measure"):
+            try:
+                mnum = int(m.get("number", ""))
+            except (ValueError, TypeError):
+                continue
+            if mnum in seen:
+                continue
+            seen.add(mnum)
+            for bl in m.findall(".//barline"):
+                if bl.findtext("bar-style", "") in ("light-light", "heavy-heavy"):
+                    votes[mnum] += 1
+    threshold = max(1, n_parts // 2)
+    return sorted(m for m, c in votes.items() if c >= threshold)
+
+
+def _infer_ts_from_measures(root, from_m: int, to_m: int) -> "tuple | None":
+    """Vote for time sig from non-whole-rest measures in measure range [from_m, to_m]."""
+    from collections import Counter as _Counter
+    ql_to_ts = {2.0: (2, 4), 3.0: (3, 4), 4.0: (4, 4), 6.0: (6, 4)}
+    qls = []
+    for part in root.findall("part"):
+        divs = 1
+        for m in part.findall("measure"):
+            try:
+                mnum = int(m.get("number", ""))
+            except (ValueError, TypeError):
+                continue
+            # Update divs from ALL measures (not just in-range ones), so that
+            # divisions declared in m1 are correctly applied to m3+ measures.
+            d_el = m.findtext(".//divisions")
+            if d_el:
+                try:
+                    divs = int(d_el)
+                except ValueError:
+                    pass
+            if not (from_m <= mnum <= to_m):
+                continue
+            notes = m.findall("note")
+            if not any(n.find("pitch") is not None for n in notes):
+                continue  # all-rest measure: skip
+            note_sum = 0
+            for n in notes:
+                if n.find("chord") is not None:
+                    continue
+                try:
+                    note_sum += int(n.findtext("duration", "0"))
+                except ValueError:
+                    pass
+            if note_sum > 0:
+                qls.append(note_sum / divs)
+    if not qls:
+        return None
+    votes = _Counter(round(ql * 2) / 2 for ql in qls)
+    best = votes.most_common(1)[0][0]
+    return ql_to_ts.get(best, (round(best), 4))
+
+
+def _retry_tromr_post_double(staffs, bar_line_boxes, multi_staffs,
+                              debug, preprocessed_image, xml_string,
+                              transformer_config,
+                              full_res_image=None, homr_to_full_scale=1.0,
+                              use_vlm=False):
+    """Re-run TrOMR on the post-double-barline region when TrOMR missed a time sig change.
+
+    If a mid-system double barline exists but the time sig before and after is the same
+    (indicating TrOMR failed to read the new printed time sig), crop each staff's grid to
+    start just before the double barline and re-run parse_staffs on the cropped region.
+    If the retry produces a different time sig, inject it into the post-double measures.
+    """
+    from collections import Counter as _C
+    import statistics as _stats
+    from homr.staff_detection import Staff as _Staff
+    from homr.model import MultiStaff as _MultiStaff
+    from homr.staff_parsing import parse_staffs as _parse_staffs
+    from homr.music_xml_generator import generate_xml as _gen_xml, XmlGeneratorArguments as _XmlArgs
+
+    try:
+        root = ET.fromstring(xml_string)
+    except ET.ParseError:
+        return xml_string
+
+    first_dbl = _first_double_bar_measure(root)
+    if first_dbl is None:
+        return xml_string
+
+    try:
+        m_end = max(
+            int(m.get("number", "0"))
+            for part in root.findall("part")
+            for m in part.findall("measure")
+            if (m.get("number", "") or "").isdigit()
+        )
+    except ValueError:
+        return xml_string
+
+    if first_dbl >= m_end - 1:
+        return xml_string  # Only a single phantom measure after barline — skip retry
+
+    def _majority_ts(from_m, to_m):
+        v = _C()
+        for part in root.findall("part"):
+            for m in part.findall("measure"):
+                try:
+                    mn = int(m.get("number", ""))
+                except (ValueError, TypeError):
+                    continue
+                if not (from_m <= mn <= to_m):
+                    continue
+                t = m.find(".//time")
+                if t is None:
+                    continue
+                try:
+                    bt = int(t.findtext("beat-type", "4"))
+                    if bt == 1:
+                        continue
+                    v[(int(t.findtext("beats", "4")), bt)] += 1
+                except ValueError:
+                    pass
+        return v.most_common(1)[0][0] if v else None
+
+    ts_before = _majority_ts(1, first_dbl)
+
+    # If TrOMR already has a clear majority time sig in the post-double segment
+    # (>50% of part-votes agree), trust it — no VLM/retry needed.
+    def _majority_ts_conf(from_m, to_m):
+        v = _C()
+        for part in root.findall("part"):
+            for m in part.findall("measure"):
+                try:
+                    mn = int(m.get("number", ""))
+                except (ValueError, TypeError):
+                    continue
+                if not (from_m <= mn <= to_m):
+                    continue
+                t = m.find(".//time")
+                if t is None:
+                    continue
+                try:
+                    bt = int(t.findtext("beat-type", "4"))
+                    if bt == 1:
+                        continue
+                    v[(int(t.findtext("beats", "4")), bt)] += 1
+                except ValueError:
+                    pass
+        if not v:
+            return None, 0.0
+        best, cnt = v.most_common(1)[0]
+        return best, cnt / sum(v.values())
+
+    # Trim phantom trailing measures before voting: skip 2+ consecutive sparse
+    # tail measures (< 1/3 of parts have notes) so they don't dilute confidence.
+    _all_parts_r = root.findall("part")
+    _n_parts_r = len(_all_parts_r)
+    _thresh_r = max(1, _n_parts_r // 3)
+    _eff_m_end = m_end
+    _sparse_run = 0
+    _probe = m_end
+    while _probe > first_dbl + 1:
+        _pwn = sum(
+            1 for _p in _all_parts_r
+            if any(
+                (m.get("number", "") or "").isdigit()
+                and int(m.get("number", "0")) == _probe
+                and m.findall("note")
+                for m in _p.findall("measure")
+            )
+        )
+        if _pwn >= _thresh_r:
+            break
+        _sparse_run += 1
+        _probe -= 1
+    if _sparse_run >= 2:
+        _eff_m_end = _probe
+        print(f"[VLM-TimeSig] phantom trim: m_end {m_end}→{_eff_m_end} ({_sparse_run} sparse tail)")
+
+    ts_post, ts_post_conf = _majority_ts_conf(first_dbl + 1, _eff_m_end)
+    if ts_post is not None and ts_post_conf > 0.75:
+        print(f"[VLM-TimeSig] post-double majority {ts_post[0]}/{ts_post[1]} "
+              f"(conf={ts_post_conf:.0%}) — trusting TrOMR, skipping retry")
+        return xml_string
+
+    # Locate consensus double barline x in HOMR coordinate space
+    all_xs = []
+    for s in staffs:
+        xs = detect_double_barlines(s, bar_line_boxes)
+        if xs:
+            all_xs.extend(xs)
+    if not all_xs:
+        return xml_string
+
+    # Cluster xs (gap > 100 px) and pick the first cluster that has notes on both sides.
+    _xs_s = sorted(all_xs)
+    _clusters, _cur = [], [_xs_s[0]]
+    for _x in _xs_s[1:]:
+        if _x - _cur[-1] > 100:
+            _clusters.append(_cur); _cur = [_x]
+        else:
+            _cur.append(_x)
+    _clusters.append(_cur)
+    _all_note_xs = [sym.center[0]
+                    for s in staffs for sym in s.symbols
+                    if hasattr(sym, "center")]
+    dbl_x = _stats.median(all_xs)  # fallback
+    for _cl in _clusters:
+        _cx = _stats.median(_cl)
+        if any(_nx < _cx for _nx in _all_note_xs) and any(_nx > _cx for _nx in _all_note_xs):
+            dbl_x = _cx
+            break
+
+    # ── VLM: primary method — ask first before trusting TrOMR ──
+    # If VLM identifies a numeric ts → apply it.
+    # If VLM says no ts visible → no change (overrides TrOMR's reading).
+    # If VLM errors → fall through to TrOMR path.
+    if use_vlm and full_res_image is not None:
+        try:
+            from PIL import Image as _PILImage
+
+            # Crop from double barline to first note after it (HOMR coords → full-res).
+            # Note: s.symbols contains homr.model.Note objects; use .center[0], not .notehead
+            note_xs = [
+                sym.center[0]
+                for s in staffs
+                for sym in s.symbols
+                if hasattr(sym, "center") and sym.center[0] > dbl_x
+            ]
+            first_note_x = min(note_xs) if note_xs else dbl_x + 150
+
+            x1 = max(0, int(dbl_x * homr_to_full_scale))
+            x2 = min(full_res_image.shape[1], int(first_note_x * homr_to_full_scale) + 10)
+
+            # Sample up to 5 staves, query VLM on each, take majority vote.
+            import random as _random
+            _staffs_sorted = sorted(staffs, key=lambda s: s.min_y)
+            _sample = (_staffs_sorted if len(_staffs_sorted) <= 5
+                       else _random.sample(_staffs_sorted, 5))
+            _votes: dict = {}
+            for _st in _sample:
+                _y1 = max(0, int(_st.min_y * homr_to_full_scale) - 10)
+                _y2 = min(full_res_image.shape[0],
+                          int(_st.max_y * homr_to_full_scale) + 10)
+                if x2 <= x1 or _y2 <= _y1:
+                    continue
+                _crop = full_res_image[_y1:_y2, x1:x2]
+                _pil = _PILImage.fromarray(
+                    _crop[:, :, ::-1] if _crop.ndim == 3 else _crop)
+                _r = _vlm_read_time_sig(_pil)
+                _key = _r if _r is not None else "none"
+                _votes[_key] = _votes.get(_key, 0) + 1
+            print(f"[VLM-TimeSig] votes: {_votes}")
+            # Majority winner; treat "none" as a valid vote
+            _winner = max(_votes, key=_votes.__getitem__)
+            vlm_ts = None if _winner == "none" else _winner
+
+            if vlm_ts is not None:
+                # VLM identified a numeric ts
+                if vlm_ts != ts_before:
+                    print(f"[VLM-TimeSig] {ts_before[0] if ts_before else '?'}"
+                          f"/{ts_before[1] if ts_before else '?'}"
+                          f" → {vlm_ts[0]}/{vlm_ts[1]} at m{first_dbl + 1}")
+                    _apply_ts_to_segment(root, vlm_ts, first_dbl + 1, m_end)
+                    return ET.tostring(root, encoding="unicode", xml_declaration=False)
+                else:
+                    print(f"[VLM-TimeSig] No change (VLM confirmed {vlm_ts[0]}/{vlm_ts[1]}) — restoring ts_before")
+                    if ts_before is not None:
+                        _apply_ts_to_segment(root, ts_before, first_dbl + 1, m_end)
+                        return ET.tostring(root, encoding="unicode", xml_declaration=False)
+                    return xml_string
+            else:
+                # VLM sees no numeric ts symbol → same ts as before the barline.
+                # Explicitly write ts_before to post-double measures so that any
+                # incorrect TrOMR reading (e.g. false 3/4 on p185) is overridden.
+                print(f"[VLM-TimeSig] No change (no ts symbol visible) — restoring ts_before")
+                if ts_before is not None:
+                    _apply_ts_to_segment(root, ts_before, first_dbl + 1, m_end)
+                    return ET.tostring(root, encoding="unicode", xml_declaration=False)
+                else:
+                    # ts_before unknown (e.g. pickup bar has no <time> element).
+                    # VLM confirmed no ts change → clear HOMR's wrong reading so
+                    # _cross_part_post_process falls back to the uniform default.
+                    for _part in root.findall("part"):
+                        for _m in _part.findall("measure"):
+                            try:
+                                _mn = int(_m.get("number", ""))
+                            except (ValueError, TypeError):
+                                continue
+                            if not (first_dbl + 1 <= _mn <= m_end):
+                                continue
+                            _attrs = _m.find("attributes")
+                            if _attrs is not None:
+                                for _t in list(_attrs.findall("time")):
+                                    _attrs.remove(_t)
+                    return ET.tostring(root, encoding="unicode", xml_declaration=False)
+        except Exception as e:
+            print(f"[VLM-TimeSig] Error: {e} — falling back to TrOMR")
+
+    # ── TrOMR fallback (VLM unavailable or errored) ──
+    ts_after = _majority_ts(first_dbl + 1, m_end)
+    if ts_after is not None and ts_after != ts_before:
+        return xml_string  # TrOMR already detected a change
+
+    margin = (staffs[0].average_unit_size if staffs else 10) * 1.5
+
+    # Build cropped MultiStaff objects: keep grid points at x ≥ (dbl_x - margin)
+    new_multi = []
+    for ms in multi_staffs:
+        cropped = []
+        for s in ms.staffs:
+            new_grid = [p for p in s.grid if p.x >= dbl_x - margin]
+            if len(new_grid) < 3:
+                continue
+            ns = _Staff(new_grid)
+            # symbols intentionally empty — TrOMR reads from the image directly
+            cropped.append(ns)
+        if cropped:
+            new_multi.append(_MultiStaff(cropped, []))
+
+    if not new_multi:
+        return xml_string
+
+    print(f"[TrOMR-retry] Re-running on post-double region (x≥{dbl_x:.0f})...")
+    try:
+        retry_result = _parse_staffs(debug, new_multi, preprocessed_image, transformer_config)
+        retry_root_obj = _gen_xml(_XmlArgs(), retry_result, "retry")
+        retry_root = ET.fromstring(retry_root_obj.to_string())
+    except Exception as e:
+        print(f"[TrOMR-retry] Failed: {e}")
+        return xml_string
+
+    # Majority vote on time sig from first measure of retry output
+    v = _C()
+    for part in retry_root.findall("part"):
+        ms_list = part.findall("measure")
+        if ms_list:
+            t = ms_list[0].find(".//time")
+            if t is not None:
+                try:
+                    bt = int(t.findtext("beat-type", "4"))
+                    if bt != 1:
+                        v[(int(t.findtext("beats", "4")), bt)] += 1
+                except ValueError:
+                    pass
+
+    new_ts = v.most_common(1)[0][0] if v else None
+    if new_ts is not None and new_ts != ts_before:
+        print(f"[TrOMR-retry] {ts_before[0] if ts_before else '?'}/{ts_before[1] if ts_before else '?'}"
+              f" → {new_ts[0]}/{new_ts[1]} at m{first_dbl + 1}")
+        _apply_ts_to_segment(root, new_ts, first_dbl + 1, m_end)
+        return ET.tostring(root, encoding="unicode", xml_declaration=False)
+
+    print(f"[TrOMR-retry] No change detected")
+    return xml_string
+
+
+def _apply_ts_to_segment(root, ts: tuple, from_m: int, to_m: int) -> None:
+    """Set time sig in first measure of [from_m, to_m] per part; remove it from others."""
+    beats, beat_type = ts
+    for part in root.findall("part"):
+        first = True
+        for m in part.findall("measure"):
+            try:
+                mnum = int(m.get("number", ""))
+            except (ValueError, TypeError):
+                continue
+            if not (from_m <= mnum <= to_m):
+                continue
+            attrs = m.find("attributes")
+            if attrs is not None:
+                for t in attrs.findall("time"):
+                    attrs.remove(t)
+            if first:
+                if attrs is None:
+                    attrs = ET.Element("attributes")
+                    m.insert(0, attrs)
+                time_el = ET.SubElement(attrs, "time")
+                ET.SubElement(time_el, "beats").text = str(beats)
+                ET.SubElement(time_el, "beat-type").text = str(beat_type)
+                first = False
+
+
+def _get_ks_contexts(root) -> list:
+    """Return [(part_name, chromatic_transpose, fifths), ...] from first-measure key sigs."""
+    name_map = {}
+    part_list = root.find("part-list")
+    if part_list is not None:
+        for sp in part_list.findall("score-part"):
+            pid = sp.get("id", "")
+            name = sp.findtext("part-name") or sp.findtext(".//instrument-name") or ""
+            name_map[pid] = name
+
+    contexts = []
+    for part in root.findall("part"):
+        pid = part.get("id", "")
+        fifths = None
+        chromatic = 0
+        for m in part.findall("measure"):
+            for attrs in m.findall("attributes"):
+                k = attrs.find("key")
+                if k is not None and fifths is None:
+                    try:
+                        fifths = int(k.findtext("fifths", "0"))
+                    except ValueError:
+                        fifths = 0
+                t = attrs.find("transpose")
+                if t is not None:
+                    try:
+                        chromatic = int(t.findtext("chromatic", "0"))
+                    except ValueError:
+                        pass
+        if fifths is not None:
+            contexts.append((name_map.get(pid, ""), chromatic, fifths))
+    return contexts
+
+
+def _apply_ks_contexts(root, contexts: list, from_m: int, to_m: int) -> None:
+    """Apply key sigs from contexts to matching parts (matched by name+chromatic_transpose).
+
+    Each matching part gets its key sig element replaced in the first measure of the range
+    and removed from subsequent measures in [from_m, to_m].
+    When a part has no name (instrument label absent from system start), falls back to
+    positional matching: context[i] → part[i].
+    """
+    lookup = {(name, chrom): fifths for name, chrom, fifths in contexts}
+    pos_fifths = [fifths for _, _, fifths in contexts]
+    name_map = {}
+    part_list = root.find("part-list")
+    if part_list is not None:
+        for sp in part_list.findall("score-part"):
+            pid = sp.get("id", "")
+            name = sp.findtext("part-name") or sp.findtext(".//instrument-name") or ""
+            name_map[pid] = name
+
+    for part_idx, part in enumerate(root.findall("part")):
+        pid = part.get("id", "")
+        part_name = name_map.get(pid, "")
+        chromatic = 0
+        for m in part.findall("measure"):
+            for attrs in m.findall("attributes"):
+                t = attrs.find("transpose")
+                if t is not None:
+                    try:
+                        chromatic = int(t.findtext("chromatic", "0"))
+                    except ValueError:
+                        pass
+            break
+
+        key = (part_name, chromatic)
+        if key in lookup:
+            fifths = lookup[key]
+        elif not part_name and part_idx < len(pos_fifths):
+            fifths = pos_fifths[part_idx]
+        else:
+            continue
+
+        first = True
+        for m in part.findall("measure"):
+            try:
+                mnum = int(m.get("number", ""))
+            except (ValueError, TypeError):
+                continue
+            if not (from_m <= mnum <= to_m):
+                continue
+            attrs = m.find("attributes")
+            if attrs is not None:
+                for k_el in attrs.findall("key"):
+                    attrs.remove(k_el)
+            if first:
+                if attrs is None:
+                    attrs = ET.Element("attributes")
+                    m.insert(0, attrs)
+                key_el = ET.SubElement(attrs, "key")
+                ET.SubElement(key_el, "fifths").text = str(fifths)
+                first = False
+
+
+def _fixup_ks_in_file(path: str, contexts: list, from_m: int, to_m: int) -> None:
+    """Read a MusicXML file, apply key sig contexts to [from_m, to_m], and rewrite."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            xml_string = f.read()
+        root = ET.fromstring(xml_string)
+        _apply_ks_contexts(root, contexts, from_m, to_m)
+        out = ET.tostring(root, encoding="unicode", xml_declaration=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(out)
+        print(f"[KeySig] fixup {path} m{from_m}-{to_m}: applied {len(contexts)} parts")
+    except Exception as e:
+        print(f"[KeySig] fixup failed for {path}: {e}")
+
+
 def _merge_canonical_name(name: str) -> str:
     """Normalize a part name for merge matching.
 
@@ -4725,8 +5120,9 @@ def merge_pages(page_xmls: List[str], output_path: str):
             master_parts.append((name, occ))
 
     print(f"[Merge] {len(master_parts)} parts across {len(page_xmls)} pages")
+    _ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
     for name, occ in master_parts:
-        suffix = f" {occ+1}" if all_instruments[name] > 1 else ""
+        suffix = f" {_ROMAN.get(occ+1, occ+1)}" if all_instruments[name] > 1 else ""
         pages_present = [i+1 for i, pk in enumerate(page_keys) if (name, occ) in pk]
         print(f"  {name}{suffix}: present on pages {pages_present}")
 
@@ -4802,7 +5198,8 @@ def merge_pages(page_xmls: List[str], output_path: str):
     for mi, (name, occ) in enumerate(master_parts):
         pid = f"P{mi+1}"
         dn = _display_name(name)
-        display_name = f"{dn} {occ+1}" if all_instruments[name] > 1 else dn
+        _ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
+        display_name = f"{dn} {_ROMAN.get(occ+1, occ+1)}" if all_instruments[name] > 1 else dn
         sp = ET.SubElement(part_list_el, "score-part", id=pid)
         ET.SubElement(sp, "part-name").text = display_name
         si = ET.SubElement(sp, "score-instrument", id=f"{pid}-I1")
@@ -5029,10 +5426,13 @@ def _make_rest_measure(number, divs, beats=4, beat_type=4, include_attrs=True,
 def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm: bool = True,
                  tremolo_templates: str = None, part_names_override: List[str] = None,
                  plugin_output: str = None, collect_plugin_data: bool = False,
-                 page_index: int = 0):
+                 page_index: int = 0, ts_context=None):
     """Full pipeline: image → MusicXML.
-    Returns (output_path, part_names) — part_names is the detected/applied instrument list,
-    useful for passing as override to subsequent pages."""
+    Returns (output_path, part_names, ts_context) where
+    ts_context=(last_ts, ended_with_bar, last_ks, ks_changed, pending_ks_fixup) is suitable
+    for passing to the next page's run_pipeline call. pending_ks_fixup, if non-None, is
+    (file_path, from_m, to_m) — a post-double key-sig range in the current output that will
+    be retroactively corrected once the next page's starting key is known."""
     print(f"\n{'='*60}")
     print(f"Processing: {img_path}")
     print(f"{'='*60}")
@@ -5051,16 +5451,22 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
     final_names = None
     plugin_pages = []
     final_xml_string = None
+    ctx = ts_context if ts_context else (None, False, None, False, None)
+    prev_ts, prev_bar_ended, prev_ks, prev_ks_changed, pending_ks_fixup = ctx
 
     if len(results) == 1:
         xml_string, part_names, plugin_page = results[0]
         if not part_names and part_names_override is not None:
             part_names = list(part_names_override)
             print(f"[Override] No labels on this page, reusing: {len(part_names)} instruments")
-        elif part_names_override is not None and len(part_names_override) > len(part_names):
-            part_names = _match_override_to_detected(part_names_override, part_names, xml_string)
         xml_string = _inject_part_names(xml_string, part_names)
-        xml_string = _cross_part_post_process(xml_string)
+        incoming_ks_changed = prev_ks_changed
+        xml_string, prev_ts, prev_bar_ended, prev_ks, prev_ks_changed, ks_fixup_range = \
+            _cross_part_post_process(xml_string, prev_ts, prev_bar_ended, prev_ks, prev_ks_changed)
+        if incoming_ks_changed and pending_ks_fixup is not None and prev_ks:
+            _fixup_ks_in_file(pending_ks_fixup[0], prev_ks, pending_ks_fixup[1], pending_ks_fixup[2])
+            pending_ks_fixup = None
+        pending_ks_fixup = (output_path,) + ks_fixup_range if ks_fixup_range else pending_ks_fixup
         final_xml_string = xml_string
         if plugin_page is not None:
             plugin_pages.append(plugin_page)
@@ -5068,7 +5474,6 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
             f.write(xml_string)
         final_names = part_names
     else:
-        import tempfile
         temp_files = []
         system_master_names = None
         for sys_idx, (xml_string, sys_names, plugin_page) in enumerate(results):
@@ -5080,12 +5485,17 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
                 if not sys_names and master_names:
                     sys_names = list(master_names)
                     print(f"[Override] System {sys_idx+1}: no labels, reusing: {len(sys_names)} instruments")
-                elif master_names and len(master_names) > len(sys_names):
-                    sys_names = _match_override_to_detected(master_names, sys_names, xml_string)
             xml_string = _inject_part_names(xml_string, sys_names)
-            xml_string = _cross_part_post_process(xml_string)
+            incoming_ks_changed = prev_ks_changed
+            xml_string, prev_ts, prev_bar_ended, prev_ks, prev_ks_changed, ks_fixup_range = \
+                _cross_part_post_process(xml_string, prev_ts, prev_bar_ended, prev_ks, prev_ks_changed)
             base, ext = os.path.splitext(output_path)
             sys_path = f"{base}_sys{sys_idx}{ext}"
+            # Retroactive fixup for previous system's post-double range.
+            if incoming_ks_changed and pending_ks_fixup is not None and prev_ks:
+                _fixup_ks_in_file(pending_ks_fixup[0], prev_ks, pending_ks_fixup[1], pending_ks_fixup[2])
+                pending_ks_fixup = None
+            pending_ks_fixup = (sys_path,) + ks_fixup_range if ks_fixup_range else pending_ks_fixup
             with open(sys_path, "w", encoding="utf-8") as f:
                 f.write(xml_string)
             temp_files.append(sys_path)
@@ -5109,9 +5519,10 @@ def run_pipeline(img_path: str, output_path: str, use_gpu: bool = True, use_vlm:
 
     elapsed = time.time() - t_start
     print(f"\n[Done] {output_path} ({elapsed:.1f}s)")
+    ts_ctx = (prev_ts, prev_bar_ended, prev_ks, prev_ks_changed, pending_ks_fixup)
     if collect_plugin_data:
-        return output_path, final_names, plugin_pages, final_xml_string
-    return output_path, final_names
+        return output_path, final_names, ts_ctx, plugin_pages, final_xml_string
+    return output_path, final_names, ts_ctx
 
 
 def main():
@@ -5150,7 +5561,7 @@ def main():
         for img_file in sorted(inputs[0].glob("*.png")):
             out_path = os.path.join(out_dir, img_file.stem + ".musicxml")
             try:
-                _, names = run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm,
+                _, names, _ = run_pipeline(str(img_file), out_path, use_gpu=use_gpu, use_vlm=use_vlm,
                              tremolo_templates=tremolo_tpl, part_names_override=detected_names)
                 if detected_names is None and names:
                     detected_names = names
@@ -5181,14 +5592,14 @@ def main():
                 sys.exit(1)
             out = str(img_path.with_suffix(".musicxml"))
             if plugin_output:
-                _, names, plugin_pages, _xml_string = run_pipeline(
+                _, names, _, plugin_pages, _xml_string = run_pipeline(
                     str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
                     tremolo_templates=tremolo_tpl, part_names_override=detected_names,
                     collect_plugin_data=True, page_index=page_idx,
                 )
                 all_plugin_pages.extend(plugin_pages)
             else:
-                _, names = run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
+                _, names, _ = run_pipeline(str(img_path), out, use_gpu=use_gpu, use_vlm=use_vlm,
                              tremolo_templates=tremolo_tpl, part_names_override=detected_names)
             if detected_names is None and names:
                 detected_names = names
