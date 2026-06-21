@@ -2286,17 +2286,23 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
     import homr.staff_detection as _hsd
     _orig_remove_dup = _hsd.remove_duplicate_staffs
     def _patched_remove_dup(staffs):
-        # HOMR's original logic removes any y-overlapping staff as duplicate.
-        # Adjacent staves can overlap by a few pixels due to SegNet dilation,
-        # causing legitimate staves (e.g. Viola) to be wrongly discarded.
-        # Only treat as duplicate when y-overlap exceeds 30% of the smaller staff height.
+        # HOMR's original logic uses bounding-box polygon overlap to detect duplicates.
+        # This breaks in two cases:
+        #   A) Adjacent staves with a few-px SegNet-dilation overlap (Tchai1 Viola case)
+        #   B) A RawStaff whose bounding box is inflated by stray fragments from the
+        #      next stave, making it look like it overlaps a legitimate neighbour.
+        # Fix: use center-y distance instead. True duplicates (same stave detected
+        # twice) have centers within a few pixels; distinct adjacent staves have
+        # centers at least 0.5 × avg_staff_h apart.
+        heights = [s.max_y - s.min_y for s in staffs]
+        avg_h = float(np.median(heights)) if heights else 1.0
+        def _is_true_dup(a, b):
+            ca = (a.min_y + a.max_y) / 2
+            cb = (b.min_y + b.max_y) / 2
+            return abs(ca - cb) < 0.5 * avg_h
         result = []
         for staff in staffs:
-            overlapping = [
-                other for other in result
-                if (min(staff.max_y, other.max_y) - max(staff.min_y, other.min_y))
-                   > 0.3 * min(staff.max_y - staff.min_y, other.max_y - other.min_y)
-            ]
+            overlapping = [other for other in result if _is_true_dup(staff, other)]
             if not overlapping:
                 result.append(staff)
                 continue
@@ -2307,7 +2313,7 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                 result.append(staff)
         removed = len(staffs) - len(result)
         if removed:
-            print(f"[HOMR] Removed {removed} duplicate staff(s) (overlap>30%)")
+            print(f"[HOMR] Removed {removed} duplicate staff(s) (center dist < 0.5×avg_h)")
         return result
     _hsd.remove_duplicate_staffs = _patched_remove_dup
     from homr.note_detection import add_notes_to_staffs, combine_noteheads_with_stems
