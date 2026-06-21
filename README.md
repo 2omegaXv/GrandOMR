@@ -2,6 +2,8 @@
 
 扫描印刷管弦乐总谱的光学音乐识别（OMR）系统，输出多声部 MusicXML。
 
+项目主页：https://2omegaxv.github.io/GrandOMR/
+
 基于 [HOMR](https://github.com/liebharc/homr) 的 TrOMR 模型做逐谱表音符识别，在此之上构建了管弦乐总谱所需的**乐器识别、谱表分组、跨声部校正、多页合并**四层逻辑。
 
 ## 架构
@@ -16,28 +18,32 @@
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 1.5: 乐器名识别       │  VLM API (Qwen3-VL) 两阶段主路径
+│  Stage 2: 谱表系统分组       │  左边距连通域分析 → 括号bbox → 间距统计（三层回退）
+└─────────────┬───────────────┘
+              ▼
+┌─────────────────────────────┐
+│  Stage 3: 乐器名识别         │  VLM API (Qwen3-VL) 两阶段主路径
 │             移调信息          │    Pass 1: 逐谱表自由识别（附谱表坐标+OCR标签提示）
 │                             │    Pass 2: 按谱表数格式化为精确 N 行
 │                             │  RapidOCR + 缩写字典 备用路径
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 2: 逐谱表识别         │  HOMR TrOMR transformer
+│  Stage 4: 逐谱表识别         │  HOMR TrOMR transformer
 │           N parts × M sys   │  按乐器数强制均分谱表
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 3: 跨声部后处理       │  Layer 0:  拍号推断（双小节线分段 + VLM投票确认 + 跨页传播）
-│                             │  Layer 0b: 调号传播（双小节线感知 + 跨页继承与回溯修正）
-│                             │  Layer 1:  拍号/调号多数投票对齐
-│                             │  Layer 2:  小节数统一
-│                             │  Layer 3:  时值修正（position tracking）
+│  Stage 5: 跨声部后处理       │  Layer 0:  拍号推断（双小节线分段 + VLM投票确认 + 跨页传播）
+│                             │  Layer 1:  调号传播（双小节线感知 + 跨页继承与回溯修正）
+│                             │  Layer 2:  拍号/调号多数投票对齐
+│                             │  Layer 3:  小节数统一
+│                             │  Layer 4:  时值修正（position tracking）
 │                             │  + 记谱溢出修复 / 三连音标记 / 双dot清理
 └─────────────┬───────────────┘
               ▼
 ┌─────────────────────────────┐
-│  Stage 4: 力度标记检测        │  YOLOv8n 微调模型检测力度符号
+│  Stage 6: 力度标记检测        │  YOLO26n 微调模型检测力度符号
 │                             │  f/p/s/hairpin 等 8 类
 │                             │  定位到小节，注入 <direction> 元素
 └─────────────┬───────────────┘
@@ -51,7 +57,7 @@
 |---|---|---|
 | 乐器识别 | 无（Part 1, Part 2...） | 两阶段 VLM API + RapidOCR 缩写字典 |
 | 移调乐器 | 不支持 | 自动检测调性，注入 `<transpose>` 元素 |
-| 力度标记 | 不支持 | YOLOv8n 微调模型检测 + 小节定位注入 |
+| 力度标记 | 不支持 | YOLO26n 微调模型检测 + 小节定位注入 |
 | 谱表分组 | 几何检测（密集总谱易出错） | OCR 确定声部数 → 强制均分 |
 | 跨声部校正 | 无 | 多层后处理（拍号推断/对齐/结构/时值/溢出修复） |
 | 多页合并 | 不支持 | 乐器并集 + divisions 归一化 + 小节拼接 |
@@ -194,7 +200,7 @@ _KEY_SEMITONES = {"C": 0, "D": 2, "Eb": 3, "E": 4, "F": 5, "G": 7, "A": 9, "Bb":
 
 `_detect_system_breaks` 将一页的谱表划分为若干行（system），采用三层优先级：
 
-1. **左边距 CC 分析（主路径）**：取所有 SegNet 分割掩码的并集，裁切到最左侧初始小节线右侧一小段区域，对该窄条做连通域分析，保留高度超过一个谱表高度的连通域，合并间距小于一个谱表高度的区间，得到各 system 的 y 范围。适用于管弦乐和钢琴谱。
+1. **全页 CC 分析（主路径）**：取所有 SegNet 分割掩码的并集，对全页二值图做连通域分析，保留高度超过一个谱表高度的连通域，合并间距小于一个谱表高度的区间，得到各 system 的 y 范围。适用于管弦乐和钢琴谱。
 2. **Fallback A — 括号/大括号检测**：在左边距 CC 分析失败时，改用 brace_dots 中高大括号的 bounding box 推断 system 边界（原始逻辑）。
 3. **Fallback B — 间距分析**：若无高大括号，检测谱表间 y 轴间距分布的最大相对跳变来切分 system（适用于钢琴/室内乐谱）。
 
@@ -262,7 +268,7 @@ ts_context = (last_ts, ended_with_bar, last_ks, ks_changed, pending_ks_fixup)
    - VLM 判断无拍号符号 → 继承前段拍号，覆盖 TrOMR 的错误读数。
    - VLM 出错 → 退回 TrOMR 重跑后双小节线区域。
 
-#### Layer 0b：调号传播（per-page）
+#### Layer 1：调号传播（per-page）
 
 调号传播依赖同一 `ts_context` 中的 `last_ks` / `ks_changed`：
 
@@ -403,11 +409,11 @@ pipeline.py 参数：
 
 ![合并 piano roll](examples/page-005-007_merged_pianoroll.png)
 
-## Stage 4: 力度标记检测
+## Stage 6: 力度标记检测
 
 ### 模型
 
-YOLOv8n 在 DeepScoresV2 dense 子集上微调 15 epoch（736张训练图，160张测试图）。
+YOLO26n 在 DeepScoresV2 dense 子集上微调 15 epoch（736张训练图，160张测试图）。
 
 - 基础权重：`yolo26n.pt`（DeepScoresV2 全类预训练）
 - 微调权重：`runs_dynamics/dynamics_finetune_15ep/weights/best.pt`

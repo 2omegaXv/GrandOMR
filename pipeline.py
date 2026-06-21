@@ -2039,13 +2039,13 @@ def _gap_based_system_split(staffs_sorted, avg_staff_h):
     return result if result else [list(staffs_sorted)]
 
 
-def _left_margin_cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
-    """Detect system boundaries via left-margin connected-component analysis.
+def _cc_system_breaks(staffs_sorted, predictions, avg_staff_h):
+    """Detect system boundaries via full-page connected-component analysis.
 
-    Takes the union of all SegNet segmentation masks, crops to the left margin
-    (up to the rightmost initial barline + small buffer), finds connected
-    components taller than one staff height, merges nearby intervals, and
-    returns a list of (y_top, y_bot) tuples in HOMR coordinates."""
+    Takes the union of all SegNet segmentation masks, runs connected-component
+    analysis on the full-page binary image, keeps components taller than one
+    staff height, merges nearby intervals, and returns a list of (y_top, y_bot)
+    tuples in HOMR coordinates."""
     h_hom, w_hom = predictions.original.shape[:2]
 
     union_hom = (
@@ -2114,7 +2114,7 @@ def _detect_system_breaks(staffs_sorted, brace_dots, predictions=None):
 
     # ── Primary: left-margin CC detection ──
     if predictions is not None:
-        cc_intervals = _left_margin_cc_system_breaks(
+        cc_intervals = _cc_system_breaks(
             staffs_sorted, predictions, avg_staff_h)
         if len(cc_intervals) >= 1:
             systems = _assign(cc_intervals)

@@ -28,6 +28,7 @@ __pycache__/
 # Large binaries
 *.whl
 *.pdf
+!report/report_outline.pdf
 *.omr
 *.mscz
 *.mxl
@@ -68,12 +69,13 @@ tchai_p1.mscz
 PIPELINE_ALGORITHM.md
 commands.txt
 test/
-
+tmp/
 ds2_dense/
 dynamics_yolo_dataset/
 audiveris_dynamics_vis/
 runs/
-runs_dynamics/
 vlm_crop_check/
 
 *.tar.gz
+zeus-grandstaff-lmx-1.0-2024-02-12.model/
+runs_dynamics/

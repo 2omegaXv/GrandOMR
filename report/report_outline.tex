@@ -26,6 +26,14 @@
 \begin{document}
 \maketitle
 
+\begin{abstract}
+We present \textbf{GrandOMR}, a hybrid pipeline for Optical Music Recognition (OMR) of scanned printed orchestral scores.
+Orchestral score OMR is not a single homogeneous problem: staff and system boundary detection, instrument name reading, per-staff note recognition, cross-part consistency repair, and dynamics detection each have distinct input distributions, output spaces, and failure modes.
+GrandOMR decomposes the task accordingly and matches each subproblem to the most appropriate computer vision method: semantic segmentation (SegNet) for staff and symbol detection, a two-pass vision-language model (Qwen3-VL) for multilingual instrument name identification including Italian, German, and German abbreviation conventions, a Transformer encoder-decoder (TrOMR) for per-staff note recognition, multi-layer rule-based post-processing for cross-part structural repair, and a fine-tuned object detector (YOLO) for dynamics detection.
+On the OpenScore Orchestra benchmark, GrandOMR achieves a page-level OMR-NED of 0.2854 and a book-level OMR-NED of 0.2968, substantially outperforming homr (0.3210 / 0.5217) and LEGATO (0.6829) while correctly recovering instrument identity, transposition, and dynamics that existing systems discard.
+Project page: \url{https://2omegaxv.github.io/GrandOMR/}.
+\end{abstract}
+
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Introduction}
 % ─────────────────────────────────────────────────────────────────────────────
@@ -48,7 +56,7 @@ Staff and system boundary detection is a geometric layout task; instrument name 
 Each subproblem has a different input distribution, output space, and failure mode.
 A monolithic end-to-end model must simultaneously master all of these, which forces compromises on every front.
 
-We present \textbf{GrandOMR}, a hybrid pipeline that decomposes orchestral score OMR into its constituent subproblems and matches each to the most appropriate computer vision method: semantic segmentation (SegNet) for staff and symbol detection, a two-pass vision-language model (VLM) for instrument name identification, a Transformer sequence model (TrOMR) for per-staff note recognition, rule-based post-processing for cross-part structural repair, and a fine-tuned object detector (YOLOv8n) for dynamics detection.
+We present \textbf{GrandOMR}, a hybrid pipeline that decomposes orchestral score OMR into its constituent subproblems and matches each to the most appropriate computer vision method: semantic segmentation (SegNet) for staff and symbol detection, a two-pass vision-language model (VLM) for instrument name identification, a Transformer sequence model (TrOMR) for per-staff note recognition, rule-based post-processing for cross-part structural repair, and a fine-tuned object detector (YOLO26n) for dynamics detection.
 This design keeps each component interpretable and controllable, makes it straightforward to replace individual stages as better models become available, and collectively achieves competitive accuracy on full orchestral scores.
 
 The remainder of the paper is organised as follows.
@@ -90,33 +98,11 @@ Trained on a large collection of engraved scores, it achieves state-of-the-art s
 Its primary limitation in the orchestral setting is the output-length constraint inherent to autoregressive decoding: a single page of a full orchestral score can contain hundreds of notes across 20 or more staves, easily exceeding practical token budgets.
 Additionally, as a single-model system, LEGATO has no explicit mechanism for recovering instrument identities, transposition, or cross-page structural context.
 
-\subsection{Positioning}
-
-% Comparison table: Audiveris / homr / LEGATO / Ours across key dimensions
-% (instrument identity, transposition, dynamics, cross-page, robustness)
-
-\begin{table}[h]
-\centering
-\begin{tabular}{@{}lcccc@{}}
-\toprule
- & Audiveris & homr & LEGATO & \textbf{Ours} \\
-\midrule
-Instrument identity   & partial & --- & --- & \checkmark \\
-Transposing instruments & partial & --- & --- & \checkmark \\
-Dynamics detection    & partial & --- & --- & \checkmark \\
-Cross-page propagation & --- & --- & --- & \checkmark \\
-Orchestral robustness & --- & partial & --- & \checkmark \\
-\bottomrule
-\end{tabular}
-\caption{Comparison of OMR systems. ``Ours'' refers to GrandOMR.}
-\end{table}
-
-
 % ─────────────────────────────────────────────────────────────────────────────
 \section{System Overview}
 % ─────────────────────────────────────────────────────────────────────────────
 
-% Architecture figure: Stage 1 → 1.5 → 2 → 3 → 4 → MusicXML output
+% Architecture figure: Stage 1 → 2 → 3 → 4 → 5 → 6 → MusicXML output
 % Key design principle: different subproblems call for different CV approaches
 
 \begin{figure}[htbp]
@@ -145,23 +131,23 @@ Orchestral robustness & --- & partial & --- & \checkmark \\
   \scriptsize detect staves $\to$ sort by $y$ $\to$ discard fragments with width $<$ 20\% median};
 
 \node[stage, below=of s1] (s15a) {%
-  \textbf{Stage\,1.5a}\enspace System Grouping\\[-2pt]
-  \scriptsize (1)\;left-margin CC analysis \;$\to$\; (2)\;bracket bbox \;$\to$\; (3)\;gap statistics};
+  \textbf{Stage\,2}\enspace System Grouping\\[-2pt]
+  \scriptsize (1)\;full-page CC analysis \;$\to$\; (2)\;bracket bbox \;$\to$\; (3)\;gap statistics};
 
 \node[stage, below=of s15a] (s15b) {%
-  \textbf{Stage\,1.5b}\enspace Instrument Name Recognition\\[-2pt]
+  \textbf{Stage\,3}\enspace Instrument Name Recognition\\[-2pt]
   \scriptsize RapidOCR gate $\to$ VLM Pass\,1 (free) + Pass\,2 (strict $N$ lines) $\to$ RapidOCR fallback};
 
 \node[stage, below=of s15b] (s2) {%
-  \textbf{Stage\,2}\enspace Per-Staff Music Recognition — TrOMR\\[-2pt]
+  \textbf{Stage\,4}\enspace Per-Staff Music Recognition — TrOMR\\[-2pt]
   \scriptsize staff crop $\to$ Transformer encoder-decoder $\to$ token sequence $\to$ group into parts};
 
 \node[stage, below=of s2] (s3) {%
-  \textbf{Stage\,3}\enspace Cross-Part Post-Processing\\[-2pt]
-  \scriptsize L0\;time-sig $\cdot$ L0b\;key-sig $\cdot$ L1\;alignment $\cdot$ L2\;measure count $\cdot$ L3\;duration repair};
+  \textbf{Stage\,5}\enspace Cross-Part Post-Processing\\[-2pt]
+  \scriptsize L0\;time-sig $\cdot$ L1\;key-sig $\cdot$ L2\;alignment $\cdot$ L3\;measure count $\cdot$ L4\;duration repair};
 
 \node[stage, below=of s3] (s4) {%
-  \textbf{Stage\,4}\enspace Dynamics Detection — YOLOv8n\\[-2pt]
+  \textbf{Stage\,6}\enspace Dynamics Detection — YOLO26n\\[-2pt]
   \scriptsize detect glyphs $\to$ compound grouping $\to$ inject \texttt{<direction>} into MusicXML};
 
 \node[iobox, below=of s4] (pgout) {Per-page MusicXML};
@@ -179,8 +165,8 @@ Orchestral robustness & --- & partial & --- & \checkmark \\
 \draw[arr, draw=orange!60] (merge)--(final);
 
 %% ─── cross-page feedback arrow (right side) ───────────────────────────────
-%  ts_context  : Stage 3 output → Stage 3 of next page   ┐
-%  part_names  : Stage 1.5b output → Stage 1.5b next page ┘
+%  ts_context  : Stage 5 output → Stage 5 of next page   ┐
+%  part_names  : Stage 3 output → Stage 3 next page ┘
 %  Both shown as one arc from s3.east → s15b.east
 \draw[darr]
   (s3.east)  -- ++(0.9,0) coordinate (rbot)
@@ -195,18 +181,18 @@ Orchestral robustness & --- & partial & --- & \checkmark \\
 \end{tikzpicture}
 \caption{GrandOMR system architecture. Blue stages form the per-page recognition pipeline.
 The dashed arrow (right) indicates cross-page state passed to the next page:
-\texttt{ts\_context} carries the active time/key-signature context into Stage~3;
-\texttt{part\_names} propagates the instrument list detected on page~1 into Stage~1.5b.
+\texttt{ts\_context} carries the active time/key-signature context into Stage~5;
+\texttt{part\_names} propagates the instrument list detected on page~1 into Stage~3.
 Orange: the multi-page merge step.}
 \label{fig:pipeline}
 \end{figure}
 
-The pipeline converts a scanned score page into a MusicXML file through five sequential stages.
+The pipeline converts a scanned score page into a MusicXML file through a sequence of modular stages.
 Stage~1 runs SegNet-based semantic segmentation (via the homr framework) to detect staves, noteheads, clef symbols, barlines, and bracket/brace structures, and uses connected-component analysis on the resulting masks to locate system boundaries.
-Stage~1.5 crops the left margin of each detected system, runs a lightweight OCR scan to check for instrument label text, and — when labels are detected — calls a two-pass VLM to assign instrument names to staves; names detected on the first page are propagated to subsequent pages via a cross-page override mechanism.
-Stage~2 crops each individual staff, deskews it, and feeds it to TrOMR, which outputs a linearised symbolic sequence; staves are then grouped into parts according to the detected instrument count.
-Stage~3 applies a suite of rule-based post-processing layers that correct time signatures (Layer~0), key signatures (Layer~0b), and metadata disagreements across parts (Layer~1), normalise measure counts (Layer~2), and repair individual measure durations (Layer~3); transposition elements for non-concert-pitch instruments are injected into the MusicXML at this stage.
-Stage~4 runs a fine-tuned YOLOv8n model to detect dynamics markings and injects \texttt{<direction>} elements into the MusicXML output.
+Stages~2--3 crop the left margin of each detected system, run a lightweight OCR scan to check for instrument label text, and --- when labels are detected --- call a two-pass VLM to assign instrument names to staves; names detected on the first page are propagated to subsequent pages via a cross-page override mechanism.
+Stage~4 crops each individual staff, deskews it, and feeds it to TrOMR, which outputs a linearised symbolic sequence; staves are then grouped into parts according to the detected instrument count.
+Stage~5 applies a suite of rule-based post-processing layers that correct time signatures (Layer~0), key signatures (Layer~1), and metadata disagreements across parts (Layer~2), normalise measure counts (Layer~3), and repair individual measure durations (Layer~4); transposition elements for non-concert-pitch instruments are injected into the MusicXML at this stage.
+Stage~6 runs a fine-tuned YOLO26n model to detect dynamics markings and injects \texttt{<direction>} elements into the MusicXML output.
 When multiple pages are processed in sequence, the \texttt{ts\_context} tuple carries the current time signature, key signature context, and any pending retroactive key-signature fixup across page boundaries.
 
 \begin{table}[h]
@@ -220,7 +206,7 @@ System boundary detection & CC + gap statistics & Geometric; no semantic underst
 Instrument name recognition & VLM (Qwen3-VL) & Open vocabulary, multilingual, context-dependent \\
 Music sequence recognition & TrOMR Transformer & Sequence transduction; complex rhythm \\
 Cross-part consistency    & Domain rules  & Well-defined constraints; cheaper than retraining \\
-Dynamics detection        & YOLOv8n (fine-tuned) & Fixed-class local pattern detection \\
+Dynamics detection        & YOLO26n (fine-tuned) & Fixed-class local pattern detection \\
 \bottomrule
 \end{tabular}
 \caption{Subproblem--method correspondence.}
@@ -243,12 +229,12 @@ Pixel-level semantic segmentation is therefore a natural fit, and we adopt the S
 
 Before system grouping, we apply a narrow-fragment filter: any detected staff whose horizontal extent is less than 20\% of the median staff width is discarded, since these arise from SegNet activating on stray ink and would otherwise cause TrOMR to crash during its internal resize.
 
-System boundary detection takes the union of all five segmentation masks, crops the result to the left margin (extending just past the rightmost initial barline of each system), and runs connected-component analysis on the cropped binary image.
+System boundary detection takes the union of all five segmentation masks and runs connected-component analysis on the full-page binary image.
 Connected components whose height exceeds one average staff height correspond to the tall bracket or brace structures that delineate a system; their vertical extents are merged with a gap tolerance of one staff height and returned as system intervals.
 When this primary method yields only a single interval (e.g.\ for single-system pages or when no brackets are detected), the pipeline falls back first to brace/bracket bounding-box detection from the dedicated brace-dot image, and finally to a gap-statistics heuristic that finds the largest relative jump in the distribution of inter-staff vertical gaps.
-Each detected system group is then deduplicated to remove staves that SegNet detected twice at the same vertical position.
+Each detected system group is then deduplicated: rather than using bounding-box polygon overlap (which falsely fires on adjacent staves with slight SegNet-dilation contact or on staves whose bounding boxes are inflated by stray fragments from a neighbouring stave), we compare stave centre-$y$ coordinates and treat two detections as duplicates only when their centres are within $0.5\times$ the median staff height.
 
-\subsection{Instrument Recognition --- VLM (Stage 1.5)}
+\subsection{Instrument Recognition --- VLM (Stages 2--3)}
 % Why VLM: open vocabulary, German/Italian abbreviations, label-to-staff ambiguity
 % OCR-gated design: RapidOCR pre-scan — skip VLM when no labels detected
 % Two-pass VLM:
@@ -258,7 +244,8 @@ Each detected system group is then deduplicated to remove staves that SegNet det
 % Cross-page propagation: first-page names as override; tacet subsequence matching
 
 Instrument name recognition is an open-vocabulary, context-dependent problem.
-Orchestral scores use abbreviations from multiple languages (German \textit{Kl.}\ or \textit{Cl.}\ for Clarinet, \textit{Fg.}\ for Bassoon, \textit{Pos.}\ for Trombone), sometimes append transposition keys (\textit{Cl.\ in A}, \textit{Trp.\ B}), and may position a single label beside a brace that spans multiple staves.
+Orchestral scores use instrument labels from multiple languages: Italian full names such as \textit{Flauto} and \textit{Corno} appear in scores including Bach's Concerto for Four Harpsichords BWV~1065, Mozart's Symphony No.~41 in C major K.~551, and Beethoven's Symphony No.~5 in C minor Op.~67; German abbreviations such as \textit{Kl.}\ for Clarinet, \textit{Fg.}\ for Bassoon, and \textit{Pos.}\ for Trombone — sometimes accompanied by explicit transposition keys (\textit{Kl.\ in A}, \textit{Trp.\ B}) — appear in scores including Brahms's Symphony No.~4 in E minor Op.~98 and Mahler's Symphony No.~7 in E minor.
+A label may also be positioned beside a brace spanning multiple staves.
 A closed-vocabulary classifier or rule-only OCR approach would require exhaustive hand-crafted patterns for every convention.
 A vision-language model, by contrast, can interpret visual context, resolve label-to-staff ambiguity by attending to brace geometry, and generalise across conventions without retraining.
 
@@ -273,10 +260,12 @@ Up to three retries are attempted; if the VLM still cannot produce $N$ valid lin
 VLM output is normalised through an abbreviation dictionary covering over 100 entries across all standard orchestral instruments in English, German, and Italian, supplemented by a synonym table that maps variant spellings to canonical names (\textit{Klavier}~$\to$ Piano, standalone \textit{Bass}~$\to$ Contrabass, \textit{French Horn}~$\to$ Horn, etc.).
 Transposition keys are extracted from the colon-separated suffix or a trailing ``in~X'' phrase and normalised (\textit{es}~$\to$ Eb, \textit{b}~$\to$ Bb, \textit{as}~$\to$ Ab).
 
-For multi-page scores, instrument names detected on the first page (or the first page that contains labels) are stored and propagated to all subsequent pages as an override.
-When the override list is longer than the number of detected staves on a later page — indicating that some instruments are tacet — a best-order-preserving subsequence matching procedure selects the subset of override names that best agrees with both the base instrument types of the detected staves and, when available, the MIDI pitch ranges actually present in the TrOMR output.
+For multi-page scores, instrument names detected on the first page (or the first page that contains labels) are stored as a reference list.
+On subsequent pages where OCR detects no instrument labels — common for continuation pages in full orchestral scores — the stored names are used directly without invoking the VLM.
+When OCR does detect labels on a later page, the VLM runs normally; the stored reference list acts as an override only when its length exceeds the number of detected staves, indicating that some instruments are tacet.
+In that case, a best-order-preserving subsequence matching procedure selects the subset of reference names that best agrees with both the base instrument types of the detected staves and, when available, the MIDI pitch ranges actually present in the TrOMR output.
 
-\subsection{Music Recognition --- TrOMR Transformer (Stage 2)}
+\subsection{Music Recognition --- TrOMR Transformer (Stage 4)}
 % Why Transformer: sequence transduction; pitch/duration relationships
 % Per-staff crop → deskew → TrOMR → symbolic sequence
 % Staff-to-part assignment: force-divide by detected instrument count
@@ -288,8 +277,9 @@ We use TrOMR~\cite{tromr} as provided by the homr framework, with no modificatio
 Each detected staff is individually cropped from the preprocessed page image (internally rescaled by SegNet) and passed to TrOMR, which returns a linearised symbolic sequence.
 Staves are sorted by vertical position and then grouped into parts by dividing the total staff count by the number of detected instruments; each part spans one stave per system.
 Multi-system pages — where some systems have fewer staves than the first (e.g.\ reduced orchestration sections) — are handled by processing each system independently and then merging the resulting MusicXML files.
+When systems differ in stave count, each shorter system is aligned to the largest (reference) system by an order-preserving dynamic-programming procedure that matches staves by clef category and key signature; unmatched reference positions receive rest-filled empty parts, ensuring all systems share the same part structure before merging.
 
-\subsection{Structural Post-Processing --- Rule-based (Stage 3)}
+\subsection{Structural Post-Processing --- Rule-based (Stage 5)}
 % Why rules: cross-part consistency constraints are well-defined;
 %   TrOMR infers each staff independently → systematic errors correctable by rules
 %
@@ -313,22 +303,24 @@ After TrOMR runs, double barlines (detected as two closely spaced barline boundi
 For each section, the pipeline takes a majority vote across all parts to determine the time signature.
 When TrOMR's vote confidence is below 75\% in a post-double-barline section, a VLM is asked to read the time signature from a crop spanning from the double barline to the first note of each sampled staff; the VLM vote overrides TrOMR's reading.
 Cross-page time-signature context is maintained in the \texttt{ts\_context} tuple: if the previous page ended without a double barline, the current page inherits the prior time signature; if it ended with one (signalling a section change), TrOMR's reading is trusted.
+Within a page, continuation segments (those not preceded by a double barline) apply a stricter criterion: a content-based time-signature change is only accepted when the HOMR symbol reader independently agrees on the same value.
+This guards against a single part with missed barlines inflating the content-based estimate to an implausible value (e.g.\ $8/4$) while all other parts contribute only whole rests and provide no counter-signal.
 
-\paragraph{Layer~0b --- Key signature.}
+\paragraph{Layer~1 --- Key signature.}
 Key signatures are propagated by a symmetric rule: in the absence of a double barline since the last system, the previous page's key signature is inherited for all matching parts (matched by instrument name and chromatic transposition); after a double barline, TrOMR's reading at the start of the new section is trusted.
 A retroactive fixup handles the case where a double barline appears mid-page: the post-double key-signature range is recorded and corrected once the next page's starting key is known from TrOMR.
 
-\paragraph{Layer~1 --- Metadata alignment.}
+\paragraph{Layer~2 --- Metadata alignment.}
 Residual disagreements in time and key signature within the same measure number across parts are resolved by majority vote, ensuring that all parts carry identical metadata at each measure position.
 
-\paragraph{Layer~2 --- Measure count normalisation.}
+\paragraph{Layer~3 --- Measure count normalisation.}
 The target measure count is the mode across all parts.
 Parts with too few measures receive appended whole-rest measures; parts with excess measures have their trailing measures removed.
 Sparse trailing measures (fewer than one third of parts containing notes) are stripped as SegNet/TrOMR recognition artifacts near page boundaries.
 
-\paragraph{Layer~3 --- Duration correction.}
+\paragraph{Layer~4 --- Duration correction.}
 For each measure of each part, position tracking computes the total sounding duration and compares it to the expected duration implied by the time signature.
-A sequence of increasingly aggressive repair strategies is applied in order: (A) whole-rest duration fixup, (B) uniform scaling when all note durations are off by the same ratio, (B$'$) note-type--to-duration alignment with backup recalculation, (C) single-note type-change to the adjacent note value, (C$'$) shrinking or removing a surplus rest, (T) triplet detection and markup, and (D) a proportional fallback scale with rounding correction.
+A sequence of increasingly aggressive repair strategies is applied in order: (A) whole-rest duration fixup, (B) uniform scaling when all note durations are off by the same ratio, (B$'$) note-type--to-duration alignment with backup recalculation, (C) single-note type-change to the adjacent note value, (C$'$) shrinking or removing a surplus rest, (D) triplet detection and markup, and (E) a proportional fallback scale with rounding correction.
 A further per-voice pass handles multi-voice measures, and a post-pass marks unlabelled triplet groups.
 
 \paragraph{Transposition.}
@@ -336,7 +328,7 @@ After part names are assigned, the pipeline injects \texttt{<transpose>} element
 The chromatic and diatonic intervals are computed from the key letter (Bb~$\to$ $-2$ semitones, F~$\to$ $-7$ semitones for Horn and English Horn, which always transpose downward).
 Bass Clarinet additionally receives an octave-change of~$-1$.
 
-\subsection{Dynamics Detection --- Fine-tuned YOLOv8n (Stage 4)}
+\subsection{Dynamics Detection --- Fine-tuned YOLO26n (Stage 6)}
 % Why YOLO: fixed-class local pattern detection; faster and more precise than VLM
 % Base weights: yolo26n.pt (DeepScoresV2 full-class pretrained)
 % Fine-tuned 15 epochs on DeepScoresV2 dense subset (736 train / 160 test)
@@ -352,8 +344,7 @@ Bass Clarinet additionally receives an octave-change of~$-1$.
 Dynamics markings such as $f$, $p$, $mf$, and $sf$ constitute a fixed, visually distinctive set of glyph classes whose spatial extent is local (a few pixels wide in a typical scan).
 Object detection is therefore preferable to the VLM used for instrument names: it is faster by an order of magnitude, does not require an API call, and is well-suited to the fixed-vocabulary, bounding-box-output nature of the task.
 
-We fine-tune YOLOv8n starting from weights pre-trained on the full DeepScoresV2 symbol vocabulary.
-Fine-tuning uses the DeepScoresV2 dense annotation subset (736 training images, 160 test images) for 15~epochs rather than 30, because the Ultralytics training schedule disables mosaic augmentation at epoch~21, causing a distribution shift that reduces mAP50 on our target classes.
+We fine-tune YOLO26n starting from \texttt{yolo26n.pt} (weights pre-trained on COCO) on the DeepScoresV2 dense annotation subset (736 training images, 160 test images) for 100~epochs.
 The model detects eight classes: \texttt{dynamic\-Crescendo\-Hairpin}, \texttt{dynamic\-Diminuendo\-Hairpin}, \texttt{dynamicF}, \texttt{dynamicM}, \texttt{dynamicP}, \texttt{dynamicR}, \texttt{dynamicS}, and \texttt{dynamicZ}.
 
 Per-class confidence thresholds are set by different criteria reflecting the musical semantics of each symbol.
@@ -365,7 +356,7 @@ Tokens that mix $f$ and $p$ (such as \texttt{fp} or \texttt{pf}) and tokens of t
 An OCR pre-scan identifies regions containing expression words (e.g.\ \textit{cresc}, \textit{dim}, \textit{poco}) and suppresses YOLO detections within those regions, avoiding false matches on the initial letters of Italian expression markings.
 Detected dynamics are finally injected as \texttt{<direction>} elements at the correct measure and note position by mapping detection pixel coordinates back to HOMR coordinate space and consulting the detected barline positions.
 
-\subsection{Interactive Localization and MuseScore Plugin (Stage 5)}
+\subsection{Interactive Localization and MuseScore Plugin (Stage 7)}
 
 The MusicXML file is only the final visible product of a much richer recognition pipeline.
 During recognition, GrandOMR has already computed staff locations, notehead boxes, TrOMR token positions, part assignments, and intermediate symbolic structures.
@@ -418,7 +409,7 @@ We compare against three baselines representing distinct points in the OMR desig
 \subsection{Instrument Classification}
 % Per-staff instrument accuracy: VLM (two-pass) vs.\ OCR-only
 
-\todo{Results}
+Across all evaluated scores — spanning Italian full names (\textit{Flauto}, \textit{Corno}), German full names, and German abbreviations — GrandOMR achieves near-perfect instrument name recognition and correct transposition assignment for all transposing instruments (Clarinet, Bass Clarinet, Horn, Trumpet, English Horn).
 
 \subsection{Music Recognition}
 
@@ -527,21 +518,20 @@ Figure~\ref{fig:pr_compare} shows the piano rolls for all four systems on the sa
 
 \begin{table}[h]
 \centering
-\begin{tabular}{@{}lcccc@{}}
+\begin{tabular}{@{}lc@{}}
 \toprule
- & No fine-tune & Fine-tune 30ep & Fine-tune 15ep \\
+ & mAP50 \\
 \midrule
-mAP50 (all)          & 0.812 & 0.809 & \textbf{0.894} \\
-mAP50 (dynamicF)     & 0.943 & 0.888 & \textbf{0.956} \\
-mAP50 (dynamicP)     & 0.898 & 0.972 & \textbf{0.980} \\
-mAP50 (dynamicS)     & 0.595 & 0.566 & \textbf{0.745} \\
+All classes   & 0.908 \\
+dynamicF      & 0.964 \\
+dynamicP      & 0.971 \\
+dynamicS      & 0.943 \\
 \bottomrule
 \end{tabular}
-\caption{Dynamics detection mAP50. Fine-tuning 15 epochs outperforms 30 epochs
-due to distribution shift when mosaic augmentation is disabled at epoch~21.}
+\caption{Dynamics detection mAP50 on the DeepScoresV2 dense test set.}
 \end{table}
 
-The per-class confidence thresholds were chosen by inspecting the precision--recall curve of the 15-epoch model on the DeepScoresV2 dense test set.
+The per-class confidence thresholds were chosen by inspecting the precision--recall curve on the DeepScoresV2 dense test set.
 Table~\ref{tab:dyn_thresh} summarises the precision and recall achieved at the selected operating point for the three classes with per-class thresholds.
 
 \begin{table}[h]
@@ -561,6 +551,20 @@ dynamicS & 0.31 & Recall-first (F1-optimal) & 0.877 & 0.906 \\
 \label{tab:dyn_thresh}
 \end{table}
 
+\begin{figure}[htbp]
+\centering
+  \includegraphics[width=\linewidth]{../runs_dynamics/dynamics_yolov8n/results.png}
+  \caption{Training curves (100~epochs on DeepScoresV2 dense).}
+  \label{fig:dyn_train}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+  \includegraphics[width=\linewidth]{../pr_curves_comparison.png}
+  \caption{Precision--Recall curves on the DeepScoresV2 dense test set.}
+  \label{fig:dyn_pr}
+\end{figure}
+
 \subsection{Qualitative Results}
 % Piano roll visualizations: single page (Mahler 7 p.5, 17 parts, 5 measures)
 %                            multi-page merge (pp.5-7, 23 parts, ~15 measures)
@@ -572,7 +576,7 @@ GrandOMR correctly identifies all 17 instruments — including transposing instr
 MIDI pitch ranges.
 The quality checker reports one residual duration error in Violin~II, measure~4
 (duration 5.0 instead of 4.0), illustrating the kind of minor inaccuracy that remains
-after Layer~3 repair.
+after Layer~4 repair.
 
 \begin{figure}[htbp]
   \centering
@@ -610,10 +614,10 @@ known difficulty on fast passage-work.
 % Future: higher-accuracy single-staff model, or end-to-end multi-staff model
 %   trained on manually corrected data.
 
-The primary limitation of GrandOMR is the recognition accuracy of TrOMR, the per-staff sequence model at the core of Stage~2.
+The primary limitation of GrandOMR is the recognition accuracy of TrOMR, the per-staff sequence model at the core of Stage~4.
 TrOMR operates independently on each staff, so errors in pitch, duration, or barline placement are common, particularly on complex rhythmic figures, beamed groups, and low-resolution scans.
-These errors propagate downstream and necessitate the multi-layer rule-based post-processing described in Stage~3 — a substantial engineering effort whose repair heuristics may themselves introduce secondary errors or overcorrect in edge cases.
-The overall effect is that the accuracy ceiling of the pipeline is set by TrOMR, and the complexity of Stage~3 is a direct consequence of that ceiling.
+These errors propagate downstream and necessitate the multi-layer rule-based post-processing described in Stage~5 — a substantial engineering effort whose repair heuristics may themselves introduce secondary errors or overcorrect in edge cases.
+The overall effect is that the accuracy ceiling of the pipeline is set by TrOMR, and the complexity of Stage~5 is a direct consequence of that ceiling.
 
 The most impactful direction for future work is therefore to raise per-staff recognition accuracy.
 Two complementary approaches are promising.
