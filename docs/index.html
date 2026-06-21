@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GrandOMR</title>
+    <meta
+      name="description"
+      content="GrandOMR is a hybrid optical music recognition pipeline for full orchestral scores, producing playback-ready MusicXML with instrument identity, transposition, dynamics, and cross-page structure."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #182026;
+        --muted: #5c6872;
+        --line: #d9e0e4;
+        --paper: #ffffff;
+        --soft: #f5f7f2;
+        --accent: #b83535;
+        --accent-2: #2f7068;
+        --accent-3: #b68b24;
+        --code: #20272d;
+        --shadow: 0 16px 40px rgba(31, 42, 49, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        line-height: 1.55;
+        color: var(--ink);
+        background: var(--paper);
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: color-mix(in srgb, var(--accent), transparent 45%);
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        color: var(--accent);
+      }
+
+      .page {
+        min-height: 100vh;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.5rem;
+        padding: 0.85rem max(20px, calc((100% - 1180px) / 2));
+        border-bottom: 1px solid rgba(217, 224, 228, 0.85);
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(14px);
+      }
+
+      .brand {
+        display: flex;
+        align-items: baseline;
+        min-width: max-content;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+
+      .brand span {
+        color: var(--accent);
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+
+      .nav-links a {
+        text-decoration: none;
+      }
+
+      .hero {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        min-height: calc(100vh - 58px);
+        padding: clamp(3rem, 7vw, 6rem) max(20px, calc((100% - 1180px) / 2)) 4rem;
+        overflow: hidden;
+        background:
+          linear-gradient(115deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.74)),
+          url("assets/page-005-007_merged_pianoroll.png") center / cover;
+      }
+
+      .eyebrow {
+        margin: 0 0 1rem;
+        color: var(--accent);
+        font-size: 0.82rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 12ch;
+        font-size: clamp(3.7rem, 10vw, 8.6rem);
+        font-weight: 900;
+      }
+
+      h2 {
+        font-size: clamp(2rem, 4vw, 3.6rem);
+      }
+
+      h3 {
+        font-size: 1.18rem;
+      }
+
+      .hero-copy {
+        max-width: none;
+        margin: 1.4rem auto 0;
+        color: #2f3a41;
+        font-size: clamp(1.05rem, 2vw, 1.35rem);
+        white-space: nowrap;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.85rem;
+        margin-top: 2rem;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        min-height: 2.85rem;
+        padding: 0.78rem 1.05rem;
+        border: 1px solid var(--ink);
+        border-radius: 6px;
+        background: var(--ink);
+        color: #fff;
+        font-weight: 750;
+        text-decoration: none;
+      }
+
+      .button svg {
+        width: 1.05rem;
+        height: 1.05rem;
+        flex: 0 0 auto;
+      }
+
+      .button.secondary {
+        background: rgba(255, 255, 255, 0.8);
+        color: var(--ink);
+      }
+
+      section {
+        padding: clamp(3rem, 6vw, 5.5rem) max(20px, calc((100% - 1180px) / 2));
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(220px, 0.42fr) minmax(0, 0.58fr);
+        gap: clamp(1.5rem, 5vw, 4rem);
+        margin-bottom: 2rem;
+      }
+
+      .section-head p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
+
+      .section-note {
+        max-width: 48rem;
+        margin: 0 0 1rem;
+        color: var(--muted);
+        font-size: 1rem;
+      }
+
+      .demo-note {
+        max-width: none;
+        white-space: nowrap;
+      }
+
+      .soft {
+        background: var(--soft);
+      }
+
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1rem;
+      }
+
+      .feature {
+        min-height: 13rem;
+        padding: 1.25rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .feature p {
+        margin: 0.75rem 0 0;
+        color: var(--muted);
+      }
+
+      .demo-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1.25rem;
+      }
+
+      .audio-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+      }
+
+      .demo {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .audio-demo {
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .audio-demo p {
+        margin: 0.35rem 0 0.8rem;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      audio {
+        width: 100%;
+      }
+
+      .score-link {
+        display: inline-flex;
+        margin-top: 0.75rem;
+        color: var(--accent-2);
+        font-size: 0.92rem;
+        font-weight: 750;
+      }
+
+      video,
+      img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .demo-body {
+        padding: 1rem 1.1rem 1.2rem;
+      }
+
+      .demo-body p {
+        margin: 0.55rem 0 0;
+        color: var(--muted);
+      }
+
+      .method-layout {
+        display: grid;
+        grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+        gap: clamp(1.5rem, 4vw, 3rem);
+        align-items: center;
+      }
+
+      .stage-list {
+        display: grid;
+        gap: 0.85rem;
+      }
+
+      .stage {
+        padding: 1rem;
+        border-left: 4px solid var(--accent-2);
+        background: #fff;
+        border-radius: 0 8px 8px 0;
+      }
+
+      .stage h3 {
+        display: flex;
+        align-items: baseline;
+        gap: 0.65rem;
+      }
+
+      .stage h3 span {
+        color: var(--accent);
+        font-size: 0.8rem;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .stage p {
+        margin: 0.45rem 0 0;
+        color: var(--muted);
+      }
+
+      .code-wrap {
+        overflow-x: auto;
+        border-radius: 8px;
+        background: var(--code);
+      }
+
+      pre {
+        margin: 0;
+        padding: 1.1rem;
+        color: #f5f7fa;
+        font-size: 0.9rem;
+        line-height: 1.55;
+      }
+
+      code {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      .run-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1rem;
+      }
+
+      .run-grid h3 {
+        margin-bottom: 0.75rem;
+      }
+
+      footer {
+        padding: 2rem max(20px, calc((100% - 1180px) / 2));
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 920px) {
+        .section-head,
+        .method-layout,
+        .run-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          min-height: auto;
+        }
+
+        .feature-grid,
+        .audio-grid,
+        .demo-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .nav {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 0.55rem;
+        }
+
+        .nav-links {
+          width: 100%;
+          overflow-x: auto;
+          padding-bottom: 0.25rem;
+        }
+
+        .hero-copy {
+          white-space: normal;
+        }
+
+        .demo-note {
+          white-space: normal;
+        }
+
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <nav class="nav" aria-label="Primary">
+        <div class="brand">Grand<span>OMR</span></div>
+        <div class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#demo">Demo</a>
+          <a href="#method">Method</a>
+          <a href="#run">Run</a>
+          <a href="assets/GrandOMR-report.pdf">Report</a>
+          <a href="https://github.com/2omegaXv/GrandOMR">GitHub</a>
+        </div>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Orchestral optical music recognition</p>
+          <h1>GrandOMR</h1>
+          <p class="hero-copy">
+            GrandOMR turns scanned orchestral scores into playback-ready MusicXML.
+          </p>
+          <div class="hero-actions">
+            <a class="button" href="#demo">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="6 3 20 12 6 21 6 3"></polygon>
+              </svg>
+              Demos
+            </a>
+            <a class="button secondary" href="assets/GrandOMR-report.pdf">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <path d="M14 2v6h6"></path>
+                <path d="M16 13H8"></path>
+                <path d="M16 17H8"></path>
+                <path d="M10 9H8"></path>
+              </svg>
+              Report
+            </a>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section id="features" class="soft">
+          <div class="section-head">
+            <h2>Why GrandOMR</h2>
+            <p>
+              GrandOMR is built for full orchestral scores: it preserves
+              instrument identity, repairs score-level structure, detects
+              playback markings, and merges pages into one usable MusicXML score.
+            </p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature">
+              <h3>Full-score orchestral MusicXML</h3>
+              <p>
+                The runner handles PDF rendering, page recognition, context
+                propagation, and final MusicXML writing, so the system can be
+                used directly on scanned score PDFs. GPU acceleration is
+                supported but not required.
+              </p>
+            </article>
+            <article class="feature">
+              <h3>Improved instrument and dynamics recognition</h3>
+              <p>
+                Instrument names are read with VLM/OCR, and dynamics are
+                detected with YOLO.
+              </p>
+            </article>
+            <article class="feature">
+              <h3>Cross-part consistency</h3>
+              <p>
+                Musical structure, such as instrument names and key signatures,
+                is kept consistent across systems and pages. GrandOMR repairs
+                score-wide structure.
+              </p>
+            </article>
+            <article class="feature">
+              <h3>Interactive MuseScore plugin</h3>
+              <p>
+                Click a note in the original image, and MuseScore jumps to the
+                matching note in the opened MusicXML.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="demo">
+          <div class="section-head">
+            <h2>Demo</h2>
+          </div>
+          <p class="section-note demo-note">
+            Listen to six score excerpts generated from GrandOMR outputs, with
+            the corresponding input score PDFs available for direct inspection.
+          </p>
+          <div class="audio-grid" aria-label="GrandOMR audio demos">
+            <article class="audio-demo">
+              <h3>BWV 1065</h3>
+              <p>Movement 1, measures 1-40</p>
+              <audio controls preload="metadata" src="assets/audio/BWV1065_1_1-40.mp3"></audio>
+              <a class="score-link" href="assets/final/BWV1065_1_1-40.pdf">Open score PDF</a>
+            </article>
+            <article class="audio-demo">
+              <h3>Beethoven 5</h3>
+              <p>Movement 4, measures 1-39</p>
+              <audio controls preload="metadata" src="assets/audio/Beethoven5_4_1-39.mp3"></audio>
+              <a class="score-link" href="assets/final/Beethoven5_4_1-39.pdf">Open score PDF</a>
+            </article>
+            <article class="audio-demo">
+              <h3>Brahms 4</h3>
+              <p>Movement 1, measures 1-72</p>
+              <audio controls preload="metadata" src="assets/audio/Brahms4_1_1-72.mp3"></audio>
+              <a class="score-link" href="assets/final/Brahms4_1_1-72.pdf">Open score PDF</a>
+            </article>
+            <article class="audio-demo">
+              <h3>Mahler 7</h3>
+              <p>Movement 5, measures 554-590</p>
+              <audio controls preload="metadata" src="assets/audio/Mahler7_5_554-590.mp3"></audio>
+              <a class="score-link" href="assets/final/Mahler7_5_554-590.pdf">Open score PDF</a>
+            </article>
+            <article class="audio-demo">
+              <h3>Mozart 41</h3>
+              <p>Movement 4, measures 1-96</p>
+              <audio controls preload="metadata" src="assets/audio/Mozart41_4_1-96.mp3"></audio>
+              <a class="score-link" href="assets/final/Mozart41_4_1-96.pdf">Open score PDF</a>
+            </article>
+            <article class="audio-demo">
+              <h3>Tchaikovsky 1</h3>
+              <p>Movement 1, measures 1-96</p>
+              <audio controls preload="metadata" src="assets/audio/Tchai1_1_1-96.mp3"></audio>
+              <a class="score-link" href="assets/final/Tchai1_1_1-96.pdf">Open score PDF</a>
+            </article>
+          </div>
+          <p class="section-note demo-note">
+            The videos show the MuseScore plugin workflow: locating recognized
+            notes in the score and playing the generated MusicXML result.
+          </p>
+          <div class="demo-grid">
+            <article class="demo">
+              <video controls playsinline preload="metadata">
+                <source src="assets/demo-single-note.mp4" type="video/mp4" />
+              </video>
+              <div class="demo-body">
+                <h3>Single-note localization</h3>
+                <p>
+                  Clicking a note maps from the generated MusicXML back to the
+                  corresponding MuseScore note object for interactive inspection.
+                </p>
+              </div>
+            </article>
+            <article class="demo">
+              <video controls playsinline preload="metadata">
+                <source src="assets/demo-playback.mp4" type="video/mp4" />
+              </video>
+              <div class="demo-body">
+                <h3>Score playback</h3>
+                <p>
+                  The recognized orchestral score is imported into MuseScore and
+                  played back with named parts and playback metadata.
+                </p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="method">
+          <div class="section-head">
+            <h2>Method</h2>
+          </div>
+          <div class="method-layout">
+            <div class="stage-list">
+              <article class="stage">
+                <h3><span>Stage 0-1</span> Segmentation and staff grouping</h3>
+                <p>
+                  HOMR-style semantic segmentation detects staves and symbols.
+                  Connected components and gap statistics group staves into
+                  orchestral systems and filter narrow fragments.
+                </p>
+              </article>
+              <article class="stage">
+                <h3><span>Stage 1.5</span> Instrument recognition</h3>
+                <p>
+                  RapidOCR first checks the margin for labels. When labels are
+                  present, a two-pass VLM assigns exactly one normalized
+                  instrument name, and optional transposition key, to each staff.
+                </p>
+              </article>
+              <article class="stage">
+                <h3><span>Stage 2</span> Per-staff music recognition</h3>
+                <p>
+                  Each detected staff is cropped and decoded by a TrOMR-style
+                  Transformer into symbolic music tokens, then grouped into
+                  named MusicXML parts.
+                </p>
+              </article>
+              <article class="stage">
+                <h3><span>Stage 3</span> Cross-part post-processing</h3>
+                <p>
+                  Music-domain rules align time signatures, key signatures,
+                  measure counts, durations, transposition, and cross-page
+                  context across all parts.
+                </p>
+              </article>
+              <article class="stage">
+                <h3><span>Stage 4</span> Dynamics detection</h3>
+                <p>
+                  A fine-tuned YOLOv8n model detects dynamics markings and
+                  injects MusicXML direction elements into the recognized page.
+                </p>
+              </article>
+              <article class="stage">
+                <h3><span>Final stage</span> Score assembly</h3>
+                <p>
+                  Per-page MusicXML files are merged into a full score by
+                  unifying parts, carrying musical context, and preserving
+                  continuous measures across pages.
+                </p>
+              </article>
+            </div>
+            <img
+              src="assets/method-diagram.png"
+              alt="GrandOMR method diagram showing segmentation, instrument recognition, staff recognition, post-processing, dynamics detection, and multi-page MusicXML merging"
+            />
+          </div>
+        </section>
+
+        <section id="run" class="soft">
+          <div class="section-head">
+            <h2>Run GrandOMR</h2>
+          </div>
+          <div class="run-grid">
+            <div>
+              <h3>Install</h3>
+              <div class="code-wrap">
+                <pre><code>git clone https://github.com/2omegaXv/GrandOMR.git
+cd GrandOMR
+pip install -r requirements.txt
+
+# Optional VLM configuration
+cp .env.example .env
+# edit .env with API_KEY and BASE_URL</code></pre>
+              </div>
+            </div>
+            <div>
+              <h3>Recognize a PDF or page image</h3>
+              <div class="code-wrap">
+                <pre><code># PDF pages, 1-based inclusive range
+python run_score.py score.pdf 1 3 -o output.musicxml --plugin-output output_plugin
+
+# Single image
+python pipeline.py score_page.png -o output.musicxml --plugin-output output_plugin --check
+
+# Multi-page image sequence
+python pipeline.py page5.png page6.png page7.png -o merged.musicxml --plugin-output merged_plugin --check</code></pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+
+      <footer>
+        GrandOMR. Built for Computer Vision, Spring 2026. Authors: Zihan Guo,
+        Chengwei Liang
+      </footer>
+    </div>
+  </body>
+</html>
