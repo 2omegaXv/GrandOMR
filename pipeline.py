@@ -2337,12 +2337,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                     n_inj = inject_tremolo(sys_result, matched, sys_staves, part_count=len(sys_result))
                     print(f"[Tremolo] System {sys_idx + 1}: {n_inj} injected")
 
-            n_ks = correct_key_signatures(
-                sys_result, sys_staves, predictions.original,
-                bar_line_boxes, full_res_image=full_image_ks)
-            if n_ks:
-                print(f"[KeySig] System {sys_idx + 1}: {n_ks} corrected")
-
             writer_notes = []
             if collect_plugin_data:
                 _tag_symbols_for_plugin(sys_result)
@@ -2458,13 +2452,6 @@ def run_homr_pipeline(img_path: str, use_gpu: bool = True, use_vlm: bool = True,
                   f"{n_inj} injected ({time.time() - t_tr:.1f}s)")
         else:
             print(f"[Tremolo] 0 detections ({time.time() - t_tr:.1f}s)")
-
-    t_ks = time.time()
-    full_image_ks = cv2.imread(img_path)
-    n_ks = correct_key_signatures(result_staffs, staffs_sorted, predictions.original,
-                                  bar_line_boxes, full_res_image=full_image_ks)
-    if n_ks:
-        print(f"[KeySig] Corrected {n_ks} key signature(s) ({time.time() - t_ks:.1f}s)")
 
     writer_notes = []
     if collect_plugin_data:
